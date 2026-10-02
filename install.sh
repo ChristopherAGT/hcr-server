@@ -22,7 +22,7 @@ SYSTEMD_DIR="/etc/systemd/system"
 PORT="8080"
 
 # Ajustes de rendimiento
-MAX_DOWNLOAD_FRAME="16384"
+MAX_DOWNLOAD_FRAME="1500"
 DOWNLOAD_POLL_TIMEOUT="8s"
 
 TRANSPORT="auto"
