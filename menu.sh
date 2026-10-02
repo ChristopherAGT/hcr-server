@@ -21,6 +21,9 @@ CHANGE_PORT_URL="${BASE_URL}/change-port.sh"
 OPTIMIZE_URL="${BASE_URL}/optimize.sh"
 RESTART_URL="${BASE_URL}/restart.sh"
 
+# Directorio temporal privado del panel
+TEMP_DIR="/root/.hcr-panel"
+
 # ─────────────────────────────────────────────────────────────
 # COLORES
 # ─────────────────────────────────────────────────────────────
@@ -65,6 +68,16 @@ pause_screen() {
 
 print_line() {
     printf "  ${DIM}────────────────────────────────────────────────────────${RESET}\n"
+}
+
+# ─────────────────────────────────────────────────────────────
+# LIMPIEZA
+# ─────────────────────────────────────────────────────────────
+
+cleanup_temp() {
+    if [[ -d "$TEMP_DIR" ]]; then
+        rm -rf "$TEMP_DIR" 2>/dev/null || true
+    fi
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -234,7 +247,6 @@ run_remote() {
     local title="$2"
 
     local temp_script
-    temp_script="$(mktemp "/tmp/hcr-panel-XXXXXX.sh")"
 
     clear_screen
 
@@ -245,10 +257,27 @@ run_remote() {
 
     echo
 
+    # Crear directorio privado
+    if ! mkdir -p "$TEMP_DIR"; then
+        printf "  ${RED}${CROSS} No se pudo crear el directorio temporal.${RESET}\n"
+        pause_screen
+        return 1
+    fi
+
+    # El directorio y su contenido solamente pueden ser usados por root
+    chmod 700 "$TEMP_DIR"
+    chown root:root "$TEMP_DIR"
+
+    # Nombre único para evitar conflictos
+    temp_script="${TEMP_DIR}/script-$$.sh"
+
     printf "  ${DIM}Conectando con GitHub...${RESET}\n"
     echo
 
-    # Descargar el script temporalmente
+    # ─────────────────────────────────────────────────────────
+    # DESCARGA
+    # ─────────────────────────────────────────────────────────
+
     if ! curl -fsSL "$url" -o "$temp_script"; then
 
         rm -f "$temp_script"
@@ -260,10 +289,29 @@ run_remote() {
         return 1
     fi
 
-    # Dar permisos temporales de ejecución
+    # ─────────────────────────────────────────────────────────
+    # SEGURIDAD
+    # ─────────────────────────────────────────────────────────
+
+    chown root:root "$temp_script"
     chmod 700 "$temp_script"
 
-    # Ejecutar el script como archivo normal
+    # Verificar que realmente sea un archivo
+    if [[ ! -f "$temp_script" ]]; then
+
+        rm -f "$temp_script"
+
+        echo
+        printf "  ${RED}${CROSS} El script descargado no es válido.${RESET}\n"
+
+        pause_screen
+        return 1
+    fi
+
+    # ─────────────────────────────────────────────────────────
+    # EJECUCIÓN
+    # ─────────────────────────────────────────────────────────
+
     if ! bash "$temp_script"; then
 
         rm -f "$temp_script"
@@ -275,7 +323,10 @@ run_remote() {
         return 1
     fi
 
-    # Eliminar inmediatamente el script temporal
+    # ─────────────────────────────────────────────────────────
+    # LIMPIEZA
+    # ─────────────────────────────────────────────────────────
+
     rm -f "$temp_script"
 
     echo
@@ -400,6 +451,8 @@ main_menu() {
 
                 echo
 
+                cleanup_temp
+
                 exit 0
                 ;;
 
@@ -423,4 +476,10 @@ main_menu() {
 check_linux
 check_root
 check_curl
+
+# Preparar directorio privado
+mkdir -p "$TEMP_DIR"
+chmod 700 "$TEMP_DIR"
+chown root:root "$TEMP_DIR"
+
 main_menu
