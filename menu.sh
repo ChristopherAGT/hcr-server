@@ -29,19 +29,12 @@ RESET="\033[0m"
 BOLD="\033[1m"
 DIM="\033[2m"
 
-BLACK="\033[30m"
 WHITE="\033[97m"
 
 RED="\033[91m"
 GREEN="\033[92m"
 YELLOW="\033[93m"
-BLUE="\033[94m"
-MAGENTA="\033[95m"
 CYAN="\033[96m"
-
-BG_BLUE="\033[44m"
-BG_CYAN="\033[46m"
-BG_RED="\033[41m"
 
 # ─────────────────────────────────────────────────────────────
 # ICONOS
@@ -49,7 +42,6 @@ BG_RED="\033[41m"
 
 CHECK="✓"
 CROSS="✕"
-ARROW="›"
 DOT="●"
 DIAMOND="◆"
 GEAR="⚙"
@@ -85,7 +77,7 @@ check_root() {
         echo
         printf "  ${RED}${CROSS} Este panel requiere privilegios de root.${RESET}\n"
         echo
-        printf "  ${DIM}Ejecuta:${RESET} ${CYAN}sudo ./panel.sh${RESET}\n"
+        printf "  ${DIM}Ejecuta:${RESET} ${CYAN}sudo ./menu.sh${RESET}\n"
         echo
         exit 1
     fi
@@ -124,6 +116,7 @@ service_indicator() {
 }
 
 get_port() {
+
     if [[ ! -f "$UNIT_PATH" ]]; then
         printf "${DIM}—${RESET}"
         return
@@ -152,6 +145,7 @@ draw_header() {
     state="$(service_state)"
 
     printf "\n"
+
     printf "  ${CYAN}╭────────────────────────────────────────────────────────╮${RESET}\n"
     printf "  ${CYAN}│${RESET}                                                        ${CYAN}│${RESET}\n"
 
@@ -163,7 +157,9 @@ draw_header() {
 
     printf "  ${CYAN}├────────────────────────────────────────────────────────┤${RESET}\n"
 
-    printf "  ${CYAN}│${RESET}  ${service_indicator} Estado     ${state}"
+    # CORREGIDO:
+    # service_indicator es una función, por eso se ejecuta con $(...)
+    printf "  ${CYAN}│${RESET}  $(service_indicator) Estado     ${state}"
     printf "          ${DIM}|${RESET}  ${PORT_ICON} Puerto "
     get_port
     printf "       ${CYAN}│${RESET}\n"
@@ -181,29 +177,36 @@ draw_menu() {
 
     printf "  ${BOLD}${WHITE}CONTROL${RESET}\n"
     printf "  ${DIM}Selecciona una operación${RESET}\n"
+
     echo
 
     printf "  ${CYAN}01${RESET}  ${WHITE}${ROCKET}${RESET}  ${BOLD}Instalar / reinstalar${RESET}\n"
     printf "      ${DIM}Instala o actualiza el servicio${RESET}\n"
+
     echo
 
     printf "  ${CYAN}02${RESET}  ${WHITE}${POWER}${RESET}  ${BOLD}Desinstalar${RESET}\n"
     printf "      ${DIM}Elimina completamente la instalación${RESET}\n"
+
     echo
 
     printf "  ${CYAN}03${RESET}  ${WHITE}${PORT_ICON}${RESET}  ${BOLD}Cambiar puerto${RESET}\n"
     printf "      ${DIM}Modifica el puerto de escucha${RESET}\n"
+
     echo
 
     printf "  ${CYAN}04${RESET}  ${WHITE}${GEAR}${RESET}  ${BOLD}Optimizar${RESET}\n"
     printf "      ${DIM}Ajusta rendimiento y recursos${RESET}\n"
+
     echo
 
     printf "  ${CYAN}05${RESET}  ${WHITE}↻${RESET}  ${BOLD}Reiniciar${RESET}\n"
     printf "      ${DIM}Reinicia el servicio HCR${RESET}\n"
 
     echo
+
     print_line
+
     echo
 
     printf "  ${DIM}00${RESET}  ${DIM}Salir del panel${RESET}\n"
@@ -224,15 +227,21 @@ run_script() {
 
     printf "\n"
     printf "  ${CYAN}${DIAMOND}${RESET} ${BOLD}${WHITE}${title}${RESET}\n"
+
     print_line
+
     echo
 
     if [[ ! -f "$script" ]]; then
+
         printf "  ${RED}${CROSS} No se encontró:${RESET}\n"
         printf "  ${DIM}%s${RESET}\n" "$script"
+
         echo
+
         pause_screen
         return
+
     fi
 
     chmod +x "$script" 2>/dev/null || true
@@ -261,6 +270,7 @@ confirm_uninstall() {
     clear_screen
 
     printf "\n"
+
     printf "  ${RED}${BOLD}╭────────────────────────────────────────────────────────╮${RESET}\n"
     printf "  ${RED}│${RESET}  ${RED}${BOLD}⚠  DESINSTALACIÓN${RESET}                               ${RED}│${RESET}\n"
     printf "  ${RED}├────────────────────────────────────────────────────────┤${RESET}\n"
@@ -274,13 +284,16 @@ confirm_uninstall() {
     read -r answer
 
     case "$answer" in
+
         s|S|si|SI|sí|Sí|sÍ|SÍ)
             run_script "$UNINSTALL_SCRIPT" "Desinstalando HCR Server"
             ;;
+
         *)
             printf "\n  ${GREEN}${CHECK}${RESET} Operación cancelada.\n"
             sleep 1
             ;;
+
     esac
 }
 
@@ -355,17 +368,23 @@ main_menu() {
                 ;;
 
             0|00|q|Q)
+
                 clear_screen
+
                 printf "\n"
                 printf "  ${CYAN}${DIAMOND}${RESET} ${BOLD}${WHITE}HCR Server${RESET}\n"
                 printf "  ${DIM}Panel cerrado correctamente.${RESET}\n"
+
                 echo
+
                 exit 0
                 ;;
 
             *)
+
                 printf "\n"
                 printf "  ${YELLOW}!${RESET} Opción no válida.\n"
+
                 sleep 1
                 ;;
 
