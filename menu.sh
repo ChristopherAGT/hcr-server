@@ -225,13 +225,16 @@ draw_menu() {
 }
 
 # ─────────────────────────────────────────────────────────────
-# EJECUTAR SCRIPT REMOTO
+# DESCARGAR Y EJECUTAR SCRIPT
 # ─────────────────────────────────────────────────────────────
 
 run_remote() {
 
     local url="$1"
     local title="$2"
+
+    local temp_script
+    temp_script="$(mktemp "/tmp/hcr-panel-XXXXXX.sh")"
 
     clear_screen
 
@@ -245,12 +248,35 @@ run_remote() {
     printf "  ${DIM}Conectando con GitHub...${RESET}\n"
     echo
 
-    if ! curl -fsSL "$url" | bash; then
+    # Descargar el script temporalmente
+    if ! curl -fsSL "$url" -o "$temp_script"; then
+
+        rm -f "$temp_script"
+
         echo
-        printf "  ${RED}${CROSS} La operación terminó con errores.${RESET}\n"
+        printf "  ${RED}${CROSS} No se pudo descargar el script desde GitHub.${RESET}\n"
+
         pause_screen
         return 1
     fi
+
+    # Dar permisos temporales de ejecución
+    chmod 700 "$temp_script"
+
+    # Ejecutar el script como archivo normal
+    if ! bash "$temp_script"; then
+
+        rm -f "$temp_script"
+
+        echo
+        printf "  ${RED}${CROSS} La operación terminó con errores.${RESET}\n"
+
+        pause_screen
+        return 1
+    fi
+
+    # Eliminar inmediatamente el script temporal
+    rm -f "$temp_script"
 
     echo
     printf "  ${GREEN}${CHECK} Operación finalizada correctamente.${RESET}\n"
