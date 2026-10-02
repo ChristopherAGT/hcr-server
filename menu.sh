@@ -1,422 +1,560 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
 # ============================================================
 # HCR SERVER — PREMIUM CONTROL PANEL
 # ============================================================
 
-set -u
-
-# ─────────────────────────────────────────────────────────────
-# CONFIGURACIÓN
-# ─────────────────────────────────────────────────────────────
-
-SERVICE_NAME="hcr-server"
-UNIT_PATH="/etc/systemd/system/hcr-server.service"
-
 BASE_URL="https://raw.githubusercontent.com/ChristopherAGT/hcr-server/main"
 
-INSTALL_URL="${BASE_URL}/install.sh"
-UNINSTALL_URL="${BASE_URL}/uninstall.sh"
-CHANGE_PORT_URL="${BASE_URL}/change-port.sh"
-OPTIMIZE_URL="${BASE_URL}/optimize.sh"
-RESTART_URL="${BASE_URL}/restart.sh"
+INSTALL_DIR="/root/.hcr-panel"
+TEMP_DIR="${INSTALL_DIR}/.tmp"
 
-# Directorio temporal privado del panel
-TEMP_DIR="/root/.hcr-panel"
+INSTALL_SCRIPT="${INSTALL_DIR}/install.sh"
+BINARY_PATH="${INSTALL_DIR}/hcr-server"
+CERT_PATH="${INSTALL_DIR}/fullchain.pem"
+KEY_PATH="${INSTALL_DIR}/privkey.pem"
 
-# ─────────────────────────────────────────────────────────────
+UNINSTALL_SCRIPT="${TEMP_DIR}/uninstall.sh"
+PORT_SCRIPT="${TEMP_DIR}/change-port.sh"
+OPTIMIZE_SCRIPT="${TEMP_DIR}/optimize.sh"
+RESTART_SCRIPT="${TEMP_DIR}/restart.sh"
+
+SPINNER_PID=""
+
+# ============================================================
 # COLORES
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
-RESET="\033[0m"
-BOLD="\033[1m"
-DIM="\033[2m"
+RESET='\033[0m'
+BOLD='\033[1m'
 
-WHITE="\033[97m"
+CYAN='\033[38;5;51m'
+BLUE='\033[38;5;75m'
+GREEN='\033[38;5;82m'
+YELLOW='\033[38;5;220m'
+RED='\033[38;5;203m'
+MAGENTA='\033[38;5;213m'
+WHITE='\033[38;5;255m'
+GRAY='\033[38;5;245m'
+DARK='\033[38;5;240m'
 
-RED="\033[91m"
-GREEN="\033[92m"
-YELLOW="\033[93m"
-CYAN="\033[96m"
-
-# ─────────────────────────────────────────────────────────────
-# ICONOS
-# ─────────────────────────────────────────────────────────────
-
-CHECK="✓"
-CROSS="✕"
-DOT="●"
-DIAMOND="◆"
-GEAR="⚙"
-ROCKET="➤"
-PORT_ICON="◉"
-POWER="◈"
-
-# ─────────────────────────────────────────────────────────────
-# TERMINAL
-# ─────────────────────────────────────────────────────────────
+# ============================================================
+# UTILIDADES
+# ============================================================
 
 clear_screen() {
-    clear 2>/dev/null || printf '\033c'
+    clear
 }
 
-pause_screen() {
+pause() {
     echo
-    printf "  ${DIM}Presiona ENTER para continuar...${RESET}"
-    read -r
+    read -rp "  Presiona ENTER para continuar..." _
 }
 
-print_line() {
-    printf "  ${DIM}────────────────────────────────────────────────────────${RESET}\n"
-}
-
-# ─────────────────────────────────────────────────────────────
-# LIMPIEZA
-# ─────────────────────────────────────────────────────────────
-
-cleanup_temp() {
-    if [[ -d "$TEMP_DIR" ]]; then
-        rm -rf "$TEMP_DIR" 2>/dev/null || true
-    fi
-}
-
-# ─────────────────────────────────────────────────────────────
-# VALIDACIONES
-# ─────────────────────────────────────────────────────────────
-
-check_root() {
-    if [[ "${EUID}" -ne 0 ]]; then
-        clear_screen
-        echo
-        printf "  ${RED}${CROSS} Este panel requiere privilegios de root.${RESET}\n"
-        echo
-        printf "  ${DIM}Ejecuta:${RESET} ${CYAN}sudo ./menu.sh${RESET}\n"
-        echo
-        exit 1
-    fi
-}
-
-check_linux() {
-    if [[ "$(uname -s)" != "Linux" ]]; then
-        clear_screen
-        printf "  ${RED}${CROSS} Este panel está diseñado para Linux.${RESET}\n"
-        exit 1
-    fi
-}
-
-check_curl() {
-    if ! command -v curl >/dev/null 2>&1; then
-        clear_screen
-        echo
-        printf "  ${RED}${CROSS} No se encontró curl.${RESET}\n"
-        echo
-        printf "  ${DIM}Instálalo con:${RESET} ${CYAN}apt install curl${RESET}\n"
-        echo
-        exit 1
-    fi
-}
-
-# ─────────────────────────────────────────────────────────────
-# INFORMACIÓN DEL SERVICIO
-# ─────────────────────────────────────────────────────────────
-
-service_state() {
-    if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-        printf "${GREEN}ACTIVO${RESET}"
-    elif systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
-        printf "${YELLOW}DETENIDO${RESET}"
-    else
-        printf "${RED}NO INSTALADO${RESET}"
-    fi
-}
-
-service_indicator() {
-    if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-        printf "${GREEN}${DOT}${RESET}"
-    elif systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
-        printf "${YELLOW}${DOT}${RESET}"
-    else
-        printf "${RED}${DOT}${RESET}"
-    fi
-}
-
-get_port() {
-
-    if [[ ! -f "$UNIT_PATH" ]]; then
-        printf "${DIM}—${RESET}"
-        return
-    fi
-
-    local port
-
-    port="$(grep -oE -- '--listen[[:space:]]+:[0-9]+' "$UNIT_PATH" 2>/dev/null \
-        | tail -n1 \
-        | grep -oE '[0-9]+$' || true)"
-
-    if [[ -n "$port" ]]; then
-        printf "${CYAN}${port}${RESET}"
-    else
-        printf "${DIM}—${RESET}"
-    fi
-}
-
-# ─────────────────────────────────────────────────────────────
-# CABECERA
-# ─────────────────────────────────────────────────────────────
-
-draw_header() {
+header() {
+    clear_screen
 
     local state
     state="$(service_state)"
 
-    printf "\n"
-
-    printf "  ${CYAN}╭────────────────────────────────────────────────────────╮${RESET}\n"
-    printf "  ${CYAN}│${RESET}                                                        ${CYAN}│${RESET}\n"
-
-    printf "  ${CYAN}│${RESET}       ${BOLD}${WHITE}H C R   S E R V E R${RESET}                       ${CYAN}│${RESET}\n"
-
-    printf "  ${CYAN}│${RESET}       ${DIM}Premium Control Panel${RESET}                     ${CYAN}│${RESET}\n"
-
-    printf "  ${CYAN}│${RESET}                                                        ${CYAN}│${RESET}\n"
-
-    printf "  ${CYAN}├────────────────────────────────────────────────────────┤${RESET}\n"
-
-    printf "  ${CYAN}│${RESET}  $(service_indicator) Estado     ${state}"
-    printf "          ${DIM}|${RESET}  ${PORT_ICON} Puerto "
-    get_port
-    printf "       ${CYAN}│${RESET}\n"
-
-    printf "  ${CYAN}╰────────────────────────────────────────────────────────╯${RESET}\n"
-
-    printf "\n"
-}
-
-# ─────────────────────────────────────────────────────────────
-# MENÚ
-# ─────────────────────────────────────────────────────────────
-
-draw_menu() {
-
-    printf "  ${BOLD}${WHITE}CONTROL${RESET}\n"
-    printf "  ${DIM}Selecciona una operación${RESET}\n"
-
     echo
+    echo -e "${CYAN}    ╭────────────────────────────────────────────────────────╮${RESET}"
+    echo -e "${CYAN}    │                                                        │${RESET}"
+    echo -e "${CYAN}    │${BOLD}${WHITE}       H C R   S E R V E R${RESET}                              ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │${GRAY}       Premium Control Panel${RESET}                            ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │                                                        │${RESET}"
+    echo -e "${CYAN}    ├────────────────────────────────────────────────────────┤${RESET}"
 
-    printf "  ${CYAN}01${RESET}  ${WHITE}${ROCKET}${RESET}  ${BOLD}Instalar / reinstalar${RESET}\n"
-    printf "      ${DIM}Instala o actualiza el servicio${RESET}\n"
-
-    echo
-
-    printf "  ${CYAN}02${RESET}  ${WHITE}${POWER}${RESET}  ${BOLD}Desinstalar${RESET}\n"
-    printf "      ${DIM}Elimina completamente la instalación${RESET}\n"
-
-    echo
-
-    printf "  ${CYAN}03${RESET}  ${WHITE}${PORT_ICON}${RESET}  ${BOLD}Cambiar puerto${RESET}\n"
-    printf "      ${DIM}Modifica el puerto de escucha${RESET}\n"
-
-    echo
-
-    printf "  ${CYAN}04${RESET}  ${WHITE}${GEAR}${RESET}  ${BOLD}Optimizar${RESET}\n"
-    printf "      ${DIM}Ajusta rendimiento y recursos${RESET}\n"
-
-    echo
-
-    printf "  ${CYAN}05${RESET}  ${WHITE}↻${RESET}  ${BOLD}Reiniciar${RESET}\n"
-    printf "      ${DIM}Reinicia el servicio HCR${RESET}\n"
-
-    echo
-
-    print_line
-
-    echo
-
-    printf "  ${DIM}00${RESET}  ${DIM}Salir del panel${RESET}\n"
-
-    echo
-}
-
-# ─────────────────────────────────────────────────────────────
-# DESCARGAR Y EJECUTAR SCRIPT
-# ─────────────────────────────────────────────────────────────
-
-run_remote() {
-
-    local url="$1"
-    local title="$2"
-
-    local temp_script
-
-    clear_screen
-
-    printf "\n"
-    printf "  ${CYAN}${DIAMOND}${RESET} ${BOLD}${WHITE}${title}${RESET}\n"
-
-    print_line
-
-    echo
-
-    # Crear directorio privado
-    if ! mkdir -p "$TEMP_DIR"; then
-        printf "  ${RED}${CROSS} No se pudo crear el directorio temporal.${RESET}\n"
-        pause_screen
-        return 1
+    if systemctl is-active --quiet hcr-server 2>/dev/null; then
+        echo -e "${CYAN}    │${RESET}  ${GREEN}●${RESET} Estado     ${GREEN}ACTIVO${RESET}          ${GRAY}◉${RESET} Puerto ${WHITE}$(get_port)${RESET}            ${CYAN}│${RESET}"
+    elif systemctl list-unit-files 2>/dev/null | grep -q '^hcr-server.service'; then
+        echo -e "${CYAN}    │${RESET}  ${RED}●${RESET} Estado     ${RED}DETENIDO${RESET}        ${GRAY}◉${RESET} Puerto ${WHITE}$(get_port)${RESET}            ${CYAN}│${RESET}"
+    else
+        echo -e "${CYAN}    │${RESET}  ${YELLOW}●${RESET} Estado     ${YELLOW}NO INSTALADO${RESET}    ${GRAY}◉${RESET} Puerto ${WHITE}---${RESET}               ${CYAN}│${RESET}"
     fi
 
-    # El directorio y su contenido solamente pueden ser usados por root
+    echo -e "${CYAN}    ╰────────────────────────────────────────────────────────╯${RESET}"
+    echo
+}
+
+service_state() {
+    if systemctl is-active --quiet hcr-server 2>/dev/null; then
+        echo "ACTIVO"
+    elif systemctl list-unit-files 2>/dev/null | grep -q '^hcr-server.service'; then
+        echo "DETENIDO"
+    else
+        echo "NO INSTALADO"
+    fi
+}
+
+get_port() {
+    local unit="/etc/systemd/system/hcr-server.service"
+
+    if [[ -f "$unit" ]]; then
+        grep -oE -- '--listen :[0-9]+' "$unit" 2>/dev/null |
+            head -n1 |
+            sed 's/--listen ://' || true
+    else
+        echo "---"
+    fi
+}
+
+spinner_start() {
+    local message="${1:-Procesando}"
+
+    (
+        local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+        local i=0
+
+        while true; do
+            printf "\r  ${CYAN}%s${RESET} %s" "${frames[$i]}" "$message"
+            i=$(( (i + 1) % ${#frames[@]} ))
+            sleep 0.08
+        done
+    ) &
+
+    SPINNER_PID=$!
+}
+
+spinner_stop() {
+    if [[ -n "${SPINNER_PID:-}" ]]; then
+        kill "$SPINNER_PID" >/dev/null 2>&1 || true
+        wait "$SPINNER_PID" 2>/dev/null || true
+        SPINNER_PID=""
+    fi
+
+    printf "\r\033[K"
+}
+
+success() {
+    echo -e "  ${GREEN}✔${RESET} $1"
+}
+
+error() {
+    echo -e "  ${RED}✖${RESET} $1"
+}
+
+warning() {
+    echo -e "  ${YELLOW}⚠${RESET} $1"
+}
+
+info() {
+    echo -e "  ${CYAN}●${RESET} $1"
+}
+
+# ============================================================
+# ROOT
+# ============================================================
+
+require_root() {
+    if [[ "${EUID}" -ne 0 ]]; then
+        error "Este panel debe ejecutarse como root."
+        exit 1
+    fi
+}
+
+# ============================================================
+# DIRECTORIOS
+# ============================================================
+
+prepare_install_dir() {
+    mkdir -p "$INSTALL_DIR"
+    mkdir -p "$TEMP_DIR"
+
+    chown root:root "$INSTALL_DIR" "$TEMP_DIR"
+
+    chmod 700 "$INSTALL_DIR"
     chmod 700 "$TEMP_DIR"
-    chown root:root "$TEMP_DIR"
-
-    # Nombre único para evitar conflictos
-    temp_script="${TEMP_DIR}/script-$$.sh"
-
-    printf "  ${DIM}Conectando con GitHub...${RESET}\n"
-    echo
-
-    # ─────────────────────────────────────────────────────────
-    # DESCARGA
-    # ─────────────────────────────────────────────────────────
-
-    if ! curl -fsSL "$url" -o "$temp_script"; then
-
-        rm -f "$temp_script"
-
-        echo
-        printf "  ${RED}${CROSS} No se pudo descargar el script desde GitHub.${RESET}\n"
-
-        pause_screen
-        return 1
-    fi
-
-    # ─────────────────────────────────────────────────────────
-    # SEGURIDAD
-    # ─────────────────────────────────────────────────────────
-
-    chown root:root "$temp_script"
-    chmod 700 "$temp_script"
-
-    # Verificar que realmente sea un archivo
-    if [[ ! -f "$temp_script" ]]; then
-
-        rm -f "$temp_script"
-
-        echo
-        printf "  ${RED}${CROSS} El script descargado no es válido.${RESET}\n"
-
-        pause_screen
-        return 1
-    fi
-
-    # ─────────────────────────────────────────────────────────
-    # EJECUCIÓN
-    # ─────────────────────────────────────────────────────────
-
-    if ! bash "$temp_script"; then
-
-        rm -f "$temp_script"
-
-        echo
-        printf "  ${RED}${CROSS} La operación terminó con errores.${RESET}\n"
-
-        pause_screen
-        return 1
-    fi
-
-    # ─────────────────────────────────────────────────────────
-    # LIMPIEZA
-    # ─────────────────────────────────────────────────────────
-
-    rm -f "$temp_script"
-
-    echo
-    printf "  ${GREEN}${CHECK} Operación finalizada correctamente.${RESET}\n"
-
-    pause_screen
 }
 
-# ─────────────────────────────────────────────────────────────
-# CONFIRMACIÓN DE DESINSTALACIÓN
-# ─────────────────────────────────────────────────────────────
+# ============================================================
+# DESCARGAS
+# ============================================================
 
-confirm_uninstall() {
+download_file() {
+    local url="$1"
+    local destination="$2"
 
-    clear_screen
+    curl -fL \
+        --retry 3 \
+        --connect-timeout 15 \
+        --max-time 120 \
+        -sS \
+        "$url" \
+        -o "${destination}.download"
 
-    printf "\n"
+    chmod 700 "${destination}.download"
+    chown root:root "${destination}.download"
 
-    printf "  ${RED}${BOLD}╭────────────────────────────────────────────────────────╮${RESET}\n"
-    printf "  ${RED}│${RESET}  ${RED}${BOLD}⚠  DESINSTALACIÓN${RESET}                               ${RED}│${RESET}\n"
-    printf "  ${RED}├────────────────────────────────────────────────────────┤${RESET}\n"
-    printf "  ${RED}│${RESET}  Esta operación eliminará la instalación de HCR.    ${RED}│${RESET}\n"
-    printf "  ${RED}│${RESET}  El servicio será detenido y eliminado de systemd.  ${RED}│${RESET}\n"
-    printf "  ${RED}╰────────────────────────────────────────────────────────╯${RESET}\n"
+    mv -f "${destination}.download" "$destination"
+}
+
+download_binary() {
+    info "Descargando binario hcr-server..."
+
+    download_file \
+        "${BASE_URL}/hcr-server" \
+        "$BINARY_PATH"
+
+    chmod 700 "$BINARY_PATH"
+    chown root:root "$BINARY_PATH"
+
+    success "Binario preparado."
+}
+
+download_install_script() {
+    info "Descargando instalador..."
+
+    download_file \
+        "${BASE_URL}/install.sh" \
+        "$INSTALL_SCRIPT"
+
+    chmod 700 "$INSTALL_SCRIPT"
+    chown root:root "$INSTALL_SCRIPT"
+
+    success "Instalador preparado."
+}
+
+# ============================================================
+# CERTIFICADOS TEMPORALES
+# ============================================================
+
+prepare_certificates() {
+
+    # Si ambos archivos existen y no están vacíos,
+    # se conservan tal como están.
+    if [[ -s "$CERT_PATH" && -s "$KEY_PATH" ]]; then
+        info "Certificados existentes detectados."
+        return 0
+    fi
+
+    warning "Certificados PEM ausentes o vacíos."
+    info "Generando certificado temporal para continuar..."
+
+    rm -f "$CERT_PATH" "$KEY_PATH"
+
+    if ! command -v openssl >/dev/null 2>&1; then
+        error "OpenSSL no está instalado."
+        error "No es posible generar los certificados temporales."
+        return 1
+    fi
+
+    local temp_key
+    local temp_cert
+
+    temp_key="${KEY_PATH}.tmp"
+    temp_cert="${CERT_PATH}.tmp"
+
+    rm -f "$temp_key" "$temp_cert"
+
+    openssl req \
+        -x509 \
+        -newkey rsa:2048 \
+        -sha256 \
+        -nodes \
+        -days 3650 \
+        -keyout "$temp_key" \
+        -out "$temp_cert" \
+        -subj "/CN=hcr-server-temporary" \
+        >/dev/null 2>&1
+
+    chown root:root "$temp_key" "$temp_cert"
+
+    chmod 600 "$temp_key"
+    chmod 644 "$temp_cert"
+
+    mv -f "$temp_key" "$KEY_PATH"
+    mv -f "$temp_cert" "$CERT_PATH"
+
+    success "Certificado temporal generado."
+}
+
+# ============================================================
+# PREPARAR INSTALACIÓN
+# ============================================================
+
+prepare_installation() {
+
+    prepare_install_dir
 
     echo
 
-    printf "  ${YELLOW}¿Deseas continuar?${RESET} ${DIM}[s/N]${RESET} "
-    read -r answer
+    download_install_script
+    download_binary
+    prepare_certificates
 
-    case "$answer" in
+    echo
 
-        s|S|si|SI|sí|Sí|sÍ|SÍ)
-            run_remote "$UNINSTALL_URL" "Desinstalando HCR Server"
-            ;;
+    if [[ ! -s "$INSTALL_SCRIPT" ]]; then
+        error "install.sh no está disponible."
+        return 1
+    fi
 
-        *)
-            printf "\n  ${GREEN}${CHECK}${RESET} Operación cancelada.\n"
-            sleep 1
-            ;;
+    if [[ ! -s "$BINARY_PATH" ]]; then
+        error "hcr-server no está disponible."
+        return 1
+    fi
 
-    esac
+    if [[ ! -s "$CERT_PATH" ]]; then
+        error "fullchain.pem no está disponible."
+        return 1
+    fi
+
+    if [[ ! -s "$KEY_PATH" ]]; then
+        error "privkey.pem no está disponible."
+        return 1
+    fi
+
+    chmod 700 "$INSTALL_SCRIPT" "$BINARY_PATH"
+    chmod 644 "$CERT_PATH"
+    chmod 600 "$KEY_PATH"
+
+    chown root:root \
+        "$INSTALL_SCRIPT" \
+        "$BINARY_PATH" \
+        "$CERT_PATH" \
+        "$KEY_PATH"
+
+    success "Paquete de instalación preparado correctamente."
 }
 
-# ─────────────────────────────────────────────────────────────
-# INSTALACIÓN
-# ─────────────────────────────────────────────────────────────
+# ============================================================
+# INSTALAR
+# ============================================================
+
+run_install() {
+
+    echo
+    info "Ejecutando instalador..."
+    echo
+
+    cd "$INSTALL_DIR"
+
+    bash "$INSTALL_SCRIPT"
+}
 
 install_service() {
-    run_remote "$INSTALL_URL" "Instalando HCR Server"
+
+    header
+
+    echo -e "  ${BOLD}${WHITE}INSTALACIÓN${RESET}"
+    echo -e "  ${GRAY}Preparando HCR Server...${RESET}"
+    echo
+
+    if ! prepare_installation; then
+        echo
+        error "No se pudo preparar la instalación."
+        pause
+        return
+    fi
+
+    echo
+
+    if run_install; then
+        echo
+        success "HCR Server instalado correctamente."
+    else
+        echo
+        error "La instalación terminó con errores."
+    fi
+
+    pause
 }
 
-# ─────────────────────────────────────────────────────────────
+# ============================================================
+# EJECUTAR SCRIPT REMOTO
+# ============================================================
+
+run_remote() {
+    local name="$1"
+    local url="$2"
+    local path="$3"
+
+    prepare_install_dir
+
+    spinner_start "Descargando ${name}..."
+
+    if ! curl -fL \
+        --retry 3 \
+        --connect-timeout 15 \
+        --max-time 120 \
+        -sS \
+        "$url" \
+        -o "$path"; then
+
+        spinner_stop
+        error "No se pudo descargar ${name}."
+        return 1
+    fi
+
+    chmod 700 "$path"
+    chown root:root "$path"
+
+    spinner_stop
+
+    bash "$path"
+    local result=$?
+
+    rm -f "$path"
+
+    return "$result"
+}
+
+# ============================================================
+# DESINSTALAR
+# ============================================================
+
+uninstall_service() {
+
+    header
+
+    echo -e "  ${BOLD}${WHITE}DESINSTALACIÓN${RESET}"
+    echo -e "  ${GRAY}Elimina la instalación de HCR Server.${RESET}"
+    echo
+
+    warning "Esta acción eliminará el servicio y sus archivos de instalación."
+    echo
+
+    read -rp "  ¿Deseas continuar? [s/N]: " answer
+
+    case "$answer" in
+        s|S|si|SI|Si)
+            ;;
+        *)
+            info "Operación cancelada."
+            pause
+            return
+            ;;
+    esac
+
+    echo
+
+    run_remote \
+        "desinstalador" \
+        "${BASE_URL}/uninstall.sh" \
+        "$UNINSTALL_SCRIPT" || true
+
+    echo
+    pause
+}
+
+# ============================================================
 # CAMBIAR PUERTO
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 change_port() {
-    run_remote "$CHANGE_PORT_URL" "Configuración de puerto"
+
+    header
+
+    echo -e "  ${BOLD}${WHITE}CAMBIAR PUERTO${RESET}"
+    echo -e "  ${GRAY}Modifica el puerto de escucha de HCR Server.${RESET}"
+    echo
+
+    run_remote \
+        "gestor de puerto" \
+        "${BASE_URL}/change-port.sh" \
+        "$PORT_SCRIPT" || true
+
+    echo
+    pause
 }
 
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # OPTIMIZAR
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 optimize_service() {
-    run_remote "$OPTIMIZE_URL" "Optimización de HCR Server"
+
+    header
+
+    echo -e "  ${BOLD}${WHITE}OPTIMIZACIÓN${RESET}"
+    echo -e "  ${GRAY}Ajusta los parámetros de rendimiento del servicio.${RESET}"
+    echo
+
+    run_remote \
+        "optimizador" \
+        "${BASE_URL}/optimize.sh" \
+        "$OPTIMIZE_SCRIPT" || true
+
+    echo
+    pause
 }
 
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # REINICIAR
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 restart_service() {
-    run_remote "$RESTART_URL" "Reiniciando HCR Server"
+
+    header
+
+    echo -e "  ${BOLD}${WHITE}REINICIAR SERVICIO${RESET}"
+    echo -e "  ${GRAY}Reinicia HCR Server y verifica su estado.${RESET}"
+    echo
+
+    run_remote \
+        "reiniciador" \
+        "${BASE_URL}/restart.sh" \
+        "$RESTART_SCRIPT" || true
+
+    echo
+    pause
 }
 
-# ─────────────────────────────────────────────────────────────
-# MENÚ PRINCIPAL
-# ─────────────────────────────────────────────────────────────
+# ============================================================
+# MENÚ
+# ============================================================
 
-main_menu() {
+show_menu() {
+
+    header
+
+    echo -e "  ${BOLD}${WHITE}CONTROL${RESET}"
+    echo -e "  ${GRAY}Selecciona una operación${RESET}"
+    echo
+
+    echo -e "  ${CYAN}01${RESET}  ${MAGENTA}➤${RESET}  ${WHITE}Instalar / reinstalar${RESET}"
+    echo -e "      ${GRAY}Instala o actualiza el servicio${RESET}"
+    echo
+
+    echo -e "  ${CYAN}02${RESET}  ${MAGENTA}◈${RESET}  ${WHITE}Desinstalar${RESET}"
+    echo -e "      ${GRAY}Elimina completamente la instalación${RESET}"
+    echo
+
+    echo -e "  ${CYAN}03${RESET}  ${MAGENTA}◉${RESET}  ${WHITE}Cambiar puerto${RESET}"
+    echo -e "      ${GRAY}Modifica el puerto de escucha${RESET}"
+    echo
+
+    echo -e "  ${CYAN}04${RESET}  ${MAGENTA}⚙${RESET}  ${WHITE}Optimizar${RESET}"
+    echo -e "      ${GRAY}Ajusta rendimiento y recursos${RESET}"
+    echo
+
+    echo -e "  ${CYAN}05${RESET}  ${MAGENTA}↻${RESET}  ${WHITE}Reiniciar${RESET}"
+    echo -e "      ${GRAY}Reinicia el servicio HCR${RESET}"
+    echo
+
+    echo -e "  ${DARK}────────────────────────────────────────────────────────${RESET}"
+    echo
+
+    echo -e "  ${GRAY}00${RESET}  ${WHITE}Salir del panel${RESET}"
+    echo
+
+    echo -ne "  ${CYAN}HCR ›${RESET} "
+}
+
+# ============================================================
+# MAIN
+# ============================================================
+
+main() {
+
+    require_root
 
     while true; do
 
-        clear_screen
+        show_menu
 
-        draw_header
-        draw_menu
-
-        printf "  ${CYAN}HCR${RESET} ${DIM}›${RESET} "
         read -r option
 
         case "$option" in
@@ -426,7 +564,7 @@ main_menu() {
                 ;;
 
             2|02)
-                confirm_uninstall
+                uninstall_service
                 ;;
 
             3|03)
@@ -441,45 +579,21 @@ main_menu() {
                 restart_service
                 ;;
 
-            0|00|q|Q)
-
-                clear_screen
-
-                printf "\n"
-                printf "  ${CYAN}${DIAMOND}${RESET} ${BOLD}${WHITE}HCR Server${RESET}\n"
-                printf "  ${DIM}Panel cerrado correctamente.${RESET}\n"
-
+            0|00)
                 echo
-
-                cleanup_temp
-
+                echo -e "  ${CYAN}HCR${RESET} ${GRAY}›${RESET} ${WHITE}Cerrando panel...${RESET}"
+                echo
                 exit 0
                 ;;
 
             *)
-
-                printf "\n"
-                printf "  ${YELLOW}!${RESET} Opción no válida.\n"
-
+                echo
+                error "Opción no válida."
                 sleep 1
                 ;;
 
         esac
-
     done
 }
 
-# ─────────────────────────────────────────────────────────────
-# INICIO
-# ─────────────────────────────────────────────────────────────
-
-check_linux
-check_root
-check_curl
-
-# Preparar directorio privado
-mkdir -p "$TEMP_DIR"
-chmod 700 "$TEMP_DIR"
-chown root:root "$TEMP_DIR"
-
-main_menu
+main "$@"
