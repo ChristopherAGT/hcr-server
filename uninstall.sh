@@ -26,12 +26,17 @@ command -v readlink >/dev/null 2>&1 || {
 SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(dirname -- "${SCRIPT_PATH}")"
 
-BINARY_PATH="${SCRIPT_DIR}/hcr-server"
-TLS_CERT_PATH="${SCRIPT_DIR}/fullchain.pem"
-TLS_KEY_PATH="${SCRIPT_DIR}/privkey.pem"
+# El script puede ejecutarse desde /root/.hcr-panel mediante menu.sh.
+# Por eso NO se utiliza SCRIPT_DIR como directorio de instalación.
 
-UNIT_SOURCE_PATH="${SCRIPT_DIR}/${SERVICE_NAME}.service"
 UNIT_LINK_PATH="${SYSTEMD_DIR}/${SERVICE_NAME}.service"
+
+# Se determinarán después de localizar la unidad real.
+INSTALL_DIR=""
+UNIT_SOURCE_PATH=""
+BINARY_PATH=""
+TLS_CERT_PATH=""
+TLS_KEY_PATH=""
 
 # ============================================================
 # COLORES
@@ -179,6 +184,9 @@ require_environment() {
 	require_command stat
 	require_command rm
 	require_command sleep
+	require_command grep
+	require_command dirname
+	require_command basename
 }
 
 # ============================================================
@@ -190,6 +198,97 @@ acquire_uninstall_lock() {
 
 	flock -n 9 ||
 		fail "Ya existe otra operación de instalación/desinstalación en curso."
+}
+
+# ============================================================
+# NORMALIZACIÓN DE RUTAS
+# ============================================================
+
+normalize_existing_path() {
+	local path="$1"
+
+	if [[ -e "$path" || -L "$path" ]]; then
+		readlink -f -- "$path"
+	else
+		printf '%s' "$path"
+	fi
+}
+
+# ============================================================
+# LOCALIZACIÓN DE LA INSTALACIÓN
+# ============================================================
+
+loaded_fragment_path() {
+	systemctl show \
+		-p FragmentPath \
+		--value \
+		"${SERVICE_NAME}.service" 2>/dev/null || true
+}
+
+discover_installation() {
+
+	local fragment
+	local resolved_fragment
+	local working_directory
+
+	fragment="$(loaded_fragment_path)"
+
+	# --------------------------------------------------------
+	# 1. Intentar obtener la unidad cargada por systemd
+	# --------------------------------------------------------
+
+	if [[ -n "$fragment" && -f "$fragment" ]]; then
+
+		resolved_fragment="$(normalize_existing_path "$fragment")"
+
+		[[ -n "$resolved_fragment" ]] ||
+			fail "No se pudo determinar la unidad de HCR Server."
+
+		UNIT_SOURCE_PATH="$resolved_fragment"
+
+	elif [[ -L "$UNIT_LINK_PATH" ]]; then
+
+		UNIT_SOURCE_PATH="$(normalize_existing_path "$UNIT_LINK_PATH")"
+
+	elif [[ -f "$UNIT_LINK_PATH" ]]; then
+
+		UNIT_SOURCE_PATH="$(normalize_existing_path "$UNIT_LINK_PATH")"
+
+	else
+
+		fail "No se encontró la unidad systemd de HCR Server."
+	fi
+
+	# --------------------------------------------------------
+	# 2. Determinar directorio de instalación
+	# --------------------------------------------------------
+
+	working_directory="$(
+		grep -E '^WorkingDirectory=' "$UNIT_SOURCE_PATH" 2>/dev/null \
+			| tail -n1 \
+			| sed 's/^WorkingDirectory=//' || true
+	)"
+
+	if [[ -n "$working_directory" && -d "$working_directory" ]]; then
+
+		INSTALL_DIR="$(normalize_existing_path "$working_directory")"
+
+	else
+
+		INSTALL_DIR="$(dirname -- "$UNIT_SOURCE_PATH")"
+
+	fi
+
+	# --------------------------------------------------------
+	# 3. Construir rutas reales
+	# --------------------------------------------------------
+
+	BINARY_PATH="${INSTALL_DIR}/hcr-server"
+	TLS_CERT_PATH="${INSTALL_DIR}/fullchain.pem"
+	TLS_KEY_PATH="${INSTALL_DIR}/privkey.pem"
+
+	# La unidad fuente real ya fue localizada.
+	UNIT_SOURCE_PATH="$(normalize_existing_path "$UNIT_SOURCE_PATH")"
 }
 
 # ============================================================
@@ -245,46 +344,85 @@ validate_root_file() {
 }
 
 # ============================================================
-# NORMALIZACIÓN DE RUTAS
+# VALIDACIÓN DE LA UNIDAD SYSTEMD
 # ============================================================
 
-normalize_existing_path() {
-	local path="$1"
+validate_unit_identity() {
 
-	if [[ -e "$path" || -L "$path" ]]; then
-		readlink -f -- "$path"
+	[[ -f "$UNIT_SOURCE_PATH" ]] ||
+		fail "La unidad systemd no existe:
+
+${UNIT_SOURCE_PATH}"
+
+	# Debe corresponder al servicio que administramos.
+	grep -qE '^Description=HCR relay$' "$UNIT_SOURCE_PATH" ||
+		fail "La unidad localizada no corresponde a HCR Server:
+
+${UNIT_SOURCE_PATH}"
+
+	# Debe ejecutar el binario HCR.
+	grep -qE "ExecStart=${BINARY_PATH//./\\.}" "$UNIT_SOURCE_PATH" ||
+		fail "La unidad localizada no apunta al binario HCR esperado:
+
+${UNIT_SOURCE_PATH}"
+}
+
+validate_unit_link() {
+
+	if [[ -L "$UNIT_LINK_PATH" ]]; then
+
+		local target
+		target="$(normalize_existing_path "$UNIT_LINK_PATH")"
+
+		if [[ "$target" != "$UNIT_SOURCE_PATH" ]]; then
+
+			fail "El enlace de systemd apunta a una unidad inesperada:
+
+${target}
+
+Unidad localizada:
+
+${UNIT_SOURCE_PATH}
+
+Por seguridad, no se eliminará."
+		fi
+
+	elif [[ -f "$UNIT_LINK_PATH" ]]; then
+
+		# Puede existir como archivo regular.
+		# Se valida su identidad antes de permitir la eliminación.
+
+		local normalized_link
+		normalized_link="$(normalize_existing_path "$UNIT_LINK_PATH")"
+
+		if [[ "$normalized_link" != "$UNIT_SOURCE_PATH" ]]; then
+
+			fail "La unidad ${UNIT_LINK_PATH} no coincide con la unidad utilizada por systemd.
+
+Por seguridad, no se eliminará."
+		fi
+
 	else
-		printf '%s' "$path"
+
+		fail "No existe la unidad systemd:
+
+${UNIT_LINK_PATH}"
+
 	fi
 }
 
-# ============================================================
-# VALIDACIÓN DEL SERVICIO
-# ============================================================
-
-loaded_fragment_path() {
-	systemctl show \
-		-p FragmentPath \
-		--value \
-		"${SERVICE_NAME}" 2>/dev/null || true
-}
-
 validate_loaded_fragment() {
+
 	local fragment
 	fragment="$(loaded_fragment_path)"
 
 	[[ -z "$fragment" ]] && return 0
 
 	local normalized_fragment
-	local normalized_source
-	local normalized_link
-
 	normalized_fragment="$(normalize_existing_path "$fragment")"
-	normalized_source="$(normalize_existing_path "$UNIT_SOURCE_PATH")"
-	normalized_link="$(normalize_existing_path "$UNIT_LINK_PATH")"
 
-	if [[ "$normalized_fragment" != "$normalized_source" &&
-		  "$normalized_fragment" != "$normalized_link" ]]; then
+	if [[ "$normalized_fragment" != "$UNIT_SOURCE_PATH" &&
+		  "$normalized_fragment" != "$(normalize_existing_path "$UNIT_LINK_PATH")" ]]; then
 
 		fail "systemd apunta a una unidad inesperada:
 
@@ -294,41 +432,20 @@ Por seguridad, no se realizará la desinstalación."
 	fi
 }
 
-validate_unit_link() {
-	if [[ -L "$UNIT_LINK_PATH" ]]; then
-
-		local target
-		local expected
-
-		target="$(normalize_existing_path "$UNIT_LINK_PATH")"
-		expected="$(normalize_existing_path "$UNIT_SOURCE_PATH")"
-
-		if [[ "$target" != "$expected" ]]; then
-
-			fail "El enlace de systemd apunta a un archivo inesperado:
-
-${target}
-
-Se esperaba:
-
-${expected}
-
-Por seguridad, no se eliminará."
-		fi
-
-	elif [[ -e "$UNIT_LINK_PATH" ]]; then
-
-		fail "Existe un archivo ${UNIT_LINK_PATH}, pero no es un enlace simbólico creado por el instalador."
-
-	fi
-}
-
 # ============================================================
 # VALIDACIÓN DE ARCHIVOS
 # ============================================================
 
 validate_installation_files() {
-	validate_secure_directory "$SCRIPT_DIR"
+
+	discover_installation
+
+	section "VALIDANDO INSTALACIÓN"
+
+	detail "Unidad detectada: ${UNIT_SOURCE_PATH}"
+	detail "Directorio detectado: ${INSTALL_DIR}"
+
+	validate_secure_directory "$INSTALL_DIR"
 
 	validate_root_file "Binario HCR" "$BINARY_PATH"
 	validate_root_file "Certificado TLS" "$TLS_CERT_PATH"
@@ -336,8 +453,11 @@ validate_installation_files() {
 	validate_root_file "Unidad systemd" "$UNIT_SOURCE_PATH"
 	validate_root_file "Desinstalador" "$SCRIPT_PATH"
 
+	validate_unit_identity
 	validate_unit_link
 	validate_loaded_fragment
+
+	success "Instalación válida localizada."
 }
 
 # ============================================================
@@ -351,6 +471,7 @@ confirm_uninstall() {
 
 	printf '\n'
 	detail "Servicio:       ${SERVICE_NAME}"
+	detail "Directorio:     ${INSTALL_DIR}"
 	detail "Binario:        ${BINARY_PATH}"
 	detail "Certificado:    ${TLS_CERT_PATH}"
 	detail "Clave privada:  ${TLS_KEY_PATH}"
@@ -433,15 +554,24 @@ remove_systemd_unit() {
 		spinner_stop
 		success "Enlace systemd eliminado."
 
-	elif [[ -e "$UNIT_LINK_PATH" ]]; then
+	elif [[ -f "$UNIT_LINK_PATH" ]]; then
 
-		fail "El archivo ${UNIT_LINK_PATH} no es el enlace esperado."
+		spinner_start "Eliminando unidad systemd..."
+
+		rm -f -- "$UNIT_LINK_PATH"
+
+		spinner_stop
+		success "Unidad systemd eliminada."
 
 	else
 
-		info "El enlace systemd ya no existe."
+		info "La unidad systemd ya no existe."
 
 	fi
+
+	# Si la unidad fuente está en otra ubicación y es diferente
+	# del enlace, será eliminada posteriormente junto con los
+	# demás archivos de la instalación.
 
 	spinner_start "Recargando configuración de systemd..."
 
@@ -471,6 +601,8 @@ remove_installation_files() {
 
 	for file in "${files[@]}"; do
 
+		# Evitar intentar eliminar dos veces la unidad si coincide
+		# con el archivo de systemd.
 		if [[ -e "$file" || -L "$file" ]]; then
 
 			spinner_start "Eliminando $(basename "$file")..."
@@ -537,17 +669,17 @@ verify_uninstall() {
 	fi
 
 	if [[ -e "$UNIT_LINK_PATH" || -L "$UNIT_LINK_PATH" ]]; then
-		error_message "El enlace systemd todavía existe."
-		failed=1
-	else
-		success "Enlace systemd eliminado."
-	fi
-
-	if [[ -e "$UNIT_SOURCE_PATH" ]]; then
 		error_message "La unidad systemd todavía existe."
 		failed=1
 	else
 		success "Unidad systemd eliminada."
+	fi
+
+	if [[ -e "$UNIT_SOURCE_PATH" || -L "$UNIT_SOURCE_PATH" ]]; then
+		error_message "La unidad fuente todavía existe."
+		failed=1
+	else
+		success "Unidad fuente eliminada."
 	fi
 
 	if [[ -e "$BINARY_PATH" ]]; then
@@ -622,12 +754,7 @@ main() {
 	require_environment
 	acquire_uninstall_lock
 
-	section "VALIDANDO INSTALACIÓN"
-
 	validate_installation_files
-
-	success "Instalación válida localizada."
-	detail "Directorio: ${SCRIPT_DIR}"
 
 	confirm_uninstall
 
@@ -649,20 +776,3 @@ main() {
 }
 
 main "$@"
-
-Qué corregí
-
-La lógica general permanece igual. El cambio relevante está en la comparación de rutas:
-
-target="$(normalize_existing_path "$UNIT_LINK_PATH")"
-expected="$(normalize_existing_path "$UNIT_SOURCE_PATH")"
-
-En lugar de comparar directamente las cadenas, ambas rutas se resuelven mediante "readlink -f". Esto evita que una diferencia de representación de la ruta haga que el desinstalador interprete incorrectamente que pertenece a otra instalación.
-
-También agregué la exportación de:
-
-export PATH LC_ALL LANG
-
-y la comprobación de "stat", porque el propio script ya depende de "stat".
-
-No necesitas modificar "menu.sh" para esta corrección. Tu panel puede seguir descargando "uninstall.sh" a "/root/.hcr-panel/" y ejecutándolo normalmente.
