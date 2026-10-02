@@ -13,13 +13,13 @@ set -u
 SERVICE_NAME="hcr-server"
 UNIT_PATH="/etc/systemd/system/hcr-server.service"
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BASE_URL="https://raw.githubusercontent.com/ChristopherAGT/hcr-server/main"
 
-INSTALL_SCRIPT="${SCRIPT_DIR}/install.sh"
-UNINSTALL_SCRIPT="${SCRIPT_DIR}/uninstall.sh"
-CHANGE_PORT_SCRIPT="${SCRIPT_DIR}/change-port.sh"
-OPTIMIZE_SCRIPT="${SCRIPT_DIR}/optimize.sh"
-RESTART_SCRIPT="${SCRIPT_DIR}/restart.sh"
+INSTALL_URL="${BASE_URL}/install.sh"
+UNINSTALL_URL="${BASE_URL}/uninstall.sh"
+CHANGE_PORT_URL="${BASE_URL}/change-port.sh"
+OPTIMIZE_URL="${BASE_URL}/optimize.sh"
+RESTART_URL="${BASE_URL}/restart.sh"
 
 # ─────────────────────────────────────────────────────────────
 # COLORES
@@ -91,6 +91,18 @@ check_linux() {
     fi
 }
 
+check_curl() {
+    if ! command -v curl >/dev/null 2>&1; then
+        clear_screen
+        echo
+        printf "  ${RED}${CROSS} No se encontró curl.${RESET}\n"
+        echo
+        printf "  ${DIM}Instálalo con:${RESET} ${CYAN}apt install curl${RESET}\n"
+        echo
+        exit 1
+    fi
+}
+
 # ─────────────────────────────────────────────────────────────
 # INFORMACIÓN DEL SERVICIO
 # ─────────────────────────────────────────────────────────────
@@ -157,8 +169,6 @@ draw_header() {
 
     printf "  ${CYAN}├────────────────────────────────────────────────────────┤${RESET}\n"
 
-    # CORREGIDO:
-    # service_indicator es una función, por eso se ejecuta con $(...)
     printf "  ${CYAN}│${RESET}  $(service_indicator) Estado     ${state}"
     printf "          ${DIM}|${RESET}  ${PORT_ICON} Puerto "
     get_port
@@ -215,12 +225,12 @@ draw_menu() {
 }
 
 # ─────────────────────────────────────────────────────────────
-# EJECUTAR SCRIPT
+# EJECUTAR SCRIPT REMOTO
 # ─────────────────────────────────────────────────────────────
 
-run_script() {
+run_remote() {
 
-    local script="$1"
+    local url="$1"
     local title="$2"
 
     clear_screen
@@ -232,31 +242,18 @@ run_script() {
 
     echo
 
-    if [[ ! -f "$script" ]]; then
-
-        printf "  ${RED}${CROSS} No se encontró:${RESET}\n"
-        printf "  ${DIM}%s${RESET}\n" "$script"
-
-        echo
-
-        pause_screen
-        return
-
-    fi
-
-    chmod +x "$script" 2>/dev/null || true
-
-    "$script"
-
-    local result=$?
-
+    printf "  ${DIM}Conectando con GitHub...${RESET}\n"
     echo
 
-    if [[ "$result" -eq 0 ]]; then
-        printf "  ${GREEN}${CHECK} Operación finalizada correctamente.${RESET}\n"
-    else
+    if ! curl -fsSL "$url" | bash; then
+        echo
         printf "  ${RED}${CROSS} La operación terminó con errores.${RESET}\n"
+        pause_screen
+        return 1
     fi
+
+    echo
+    printf "  ${GREEN}${CHECK} Operación finalizada correctamente.${RESET}\n"
 
     pause_screen
 }
@@ -286,7 +283,7 @@ confirm_uninstall() {
     case "$answer" in
 
         s|S|si|SI|sí|Sí|sÍ|SÍ)
-            run_script "$UNINSTALL_SCRIPT" "Desinstalando HCR Server"
+            run_remote "$UNINSTALL_URL" "Desinstalando HCR Server"
             ;;
 
         *)
@@ -302,7 +299,7 @@ confirm_uninstall() {
 # ─────────────────────────────────────────────────────────────
 
 install_service() {
-    run_script "$INSTALL_SCRIPT" "Instalando HCR Server"
+    run_remote "$INSTALL_URL" "Instalando HCR Server"
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -310,7 +307,7 @@ install_service() {
 # ─────────────────────────────────────────────────────────────
 
 change_port() {
-    run_script "$CHANGE_PORT_SCRIPT" "Configuración de puerto"
+    run_remote "$CHANGE_PORT_URL" "Configuración de puerto"
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -318,7 +315,7 @@ change_port() {
 # ─────────────────────────────────────────────────────────────
 
 optimize_service() {
-    run_script "$OPTIMIZE_SCRIPT" "Optimización de HCR Server"
+    run_remote "$OPTIMIZE_URL" "Optimización de HCR Server"
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -326,7 +323,7 @@ optimize_service() {
 # ─────────────────────────────────────────────────────────────
 
 restart_service() {
-    run_script "$RESTART_SCRIPT" "Reiniciando HCR Server"
+    run_remote "$RESTART_URL" "Reiniciando HCR Server"
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -399,4 +396,5 @@ main_menu() {
 
 check_linux
 check_root
+check_curl
 main_menu
