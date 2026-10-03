@@ -19,7 +19,7 @@ export PATH LC_ALL LANG
 SERVICE_NAME="hcr-server"
 SYSTEMD_DIR="/etc/systemd/system"
 
-PORT="8080"
+PORT="8880"
 
 # Ajustes de rendimiento
 MAX_DOWNLOAD_FRAME="1500"
