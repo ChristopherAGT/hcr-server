@@ -19,7 +19,8 @@ export PATH LC_ALL LANG
 SERVICE_NAME="hcr-server"
 SYSTEMD_DIR="/etc/systemd/system"
 
-PORT="8880"
+PORT="8080"
+TARGET_PORT="22"
 
 # Ajustes de rendimiento
 MAX_DOWNLOAD_FRAME="1500"
@@ -200,6 +201,61 @@ run_spinner() {
 fail() {
 	error_message "$*"
 	exit 1
+}
+
+# ------------------------------------------------------------
+# CONFIGURACIÓN INTERACTIVA
+# ------------------------------------------------------------
+
+validate_port() {
+	local port="$1"
+
+	[[ "${port}" =~ ^[0-9]+$ ]] ||
+		return 1
+
+	(( port >= 1 && port <= 65535 ))
+}
+
+configure_ports() {
+	local input
+
+	section "Configuración de puertos"
+
+	while true; do
+		printf "${WHITE}Puerto para HCR Server${RESET} ${DIM}[${PORT}]${RESET}: "
+		read -r input
+
+		if [ -z "${input}" ]; then
+			break
+		fi
+
+		if validate_port "${input}"; then
+			PORT="${input}"
+			break
+		fi
+
+		error_message "Puerto no válido. Debe estar entre 1 y 65535."
+	done
+
+	success "Puerto HCR configurado: ${PORT}"
+
+	while true; do
+		printf "${WHITE}Puerto destino para redirección${RESET} ${DIM}[${TARGET_PORT}]${RESET}: "
+		read -r input
+
+		if [ -z "${input}" ]; then
+			break
+		fi
+
+		if validate_port "${input}"; then
+			TARGET_PORT="${input}"
+			break
+		fi
+
+		error_message "Puerto no válido. Debe estar entre 1 y 65535."
+	done
+
+	success "Puerto destino configurado: ${TARGET_PORT}"
 }
 
 # ------------------------------------------------------------
@@ -486,7 +542,7 @@ Group=root
 
 WorkingDirectory=${SCRIPT_DIR}
 
-ExecStart=${BINARY_PATH} --listen :${PORT} --target 127.0.0.1:22 --transport ${TRANSPORT}${tls_arguments} --max-download-frame ${MAX_DOWNLOAD_FRAME} --download-poll-timeout ${DOWNLOAD_POLL_TIMEOUT}
+ExecStart=${BINARY_PATH} --listen :${PORT} --target 127.0.0.1:${TARGET_PORT} --transport ${TRANSPORT}${tls_arguments} --max-download-frame ${MAX_DOWNLOAD_FRAME} --download-poll-timeout ${DOWNLOAD_POLL_TIMEOUT}
 
 Restart=on-failure
 RestartSec=5s
@@ -735,6 +791,9 @@ show_summary() {
 	printf "  ${CYAN}${ICON_ARROW}${RESET} Puerto         : ${BRIGHT_WHITE}%s${RESET}\n" \
 		"${PORT}"
 
+	printf "  ${CYAN}${ICON_ARROW}${RESET} Puerto destino : ${BRIGHT_WHITE}%s${RESET}\n" \
+		"${TARGET_PORT}"
+
 	printf "  ${CYAN}${ICON_ARROW}${RESET} Transporte     : ${BRIGHT_WHITE}%s${RESET}\n" \
 		"${TRANSPORT}"
 
@@ -791,6 +850,8 @@ main() {
 		spinner_stop fail
 		fail "No se pudo adquirir el bloqueo de instalación."
 	fi
+
+	configure_ports
 
 	validate_bundle
 
