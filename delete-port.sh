@@ -8,33 +8,19 @@ set -euo pipefail
 #
 # CARACTERÍSTICAS:
 #
+#   - Detecta automáticamente las instancias HCR existentes.
+#   - Muestra únicamente las instancias actualmente activas.
+#   - Permite seleccionar la instancia mediante un menú.
 #   - NO elimina el binario HCR.
 #   - NO elimina certificados.
 #   - NO modifica otras instancias.
-#   - NO supone que existan puertos concretos.
-#   - Detecta dinámicamente las instancias HCR existentes.
+#   - Detecta dinámicamente la unidad real de systemd.
 #   - Detiene únicamente la instancia seleccionada.
 #   - Deshabilita únicamente la instancia seleccionada.
-#   - Elimina únicamente la unidad correspondiente al puerto.
-#   - Verifica la unidad antes de eliminarla.
+#   - Elimina únicamente la unidad correspondiente.
+#   - Verifica FragmentPath antes de eliminar.
 #   - Recarga systemd después de la eliminación.
-#
-# Estructura esperada:
-#
-#   /root/.hcr-panel/
-#   ├── hcr-server
-#   ├── fullchain.pem
-#   └── privkey.pem
-#
-# Las unidades pueden encontrarse en:
-#
-#   /root/.hcr-panel/hcr-server-XXXX.service
-#   /etc/systemd/system/hcr-server-XXXX.service
-#
-# Parámetros de referencia:
-#
-#   MAX_DOWNLOAD_FRAME=1500
-#   DOWNLOAD_POLL_TIMEOUT=5s
+#   - Verifica que el puerto haya quedado libre.
 #
 # Compatible con múltiples instancias HCR Server.
 # ============================================================
@@ -72,6 +58,7 @@ UNIT_LINK=""
 TEMP_UNIT=""
 
 LOCK_FD_OPEN="false"
+SPINNER_PID=""
 
 # ============================================================
 # COLORES
@@ -109,11 +96,12 @@ ICON_DOT="•"
 # SPINNER
 # ============================================================
 
-SPINNER_PID=""
-
 spinner_start() {
 
 	local message="$1"
+
+	# Evitar múltiples spinners simultáneos.
+	spinner_stop >/dev/null 2>&1 || true
 
 	(
 		local frames=(
@@ -133,7 +121,7 @@ spinner_start() {
 
 		while true; do
 
-			printf '\r%b' \
+			printf '\r\033[K%b' \
 				"${BRIGHT_CYAN}${frames[$i]}${RESET} ${WHITE}${message}${RESET}"
 
 			i=$(( (i + 1) % ${#frames[@]} ))
@@ -149,7 +137,7 @@ spinner_start() {
 
 spinner_stop() {
 
-	if [[ -n "${SPINNER_PID}" ]]; then
+	if [[ -n "${SPINNER_PID:-}" ]]; then
 
 		kill "${SPINNER_PID}" >/dev/null 2>&1 || true
 
@@ -157,9 +145,8 @@ spinner_stop() {
 
 		SPINNER_PID=""
 
+		printf '\r\033[K'
 	fi
-
-	printf '\r\033[K'
 }
 
 # ============================================================
@@ -273,9 +260,12 @@ require_command() {
 
 	local command_name="$1"
 
-	command -v "${command_name}" >/dev/null 2>&1 ||
+	if ! command -v "${command_name}" >/dev/null 2>&1; then
+
 		fail \
 			"No se encontró el comando requerido: ${command_name}"
+
+	fi
 }
 
 # ============================================================
@@ -286,8 +276,7 @@ validate_port() {
 
 	local port="$1"
 
-	[[ "${port}" =~ ^[0-9]+$ ]] ||
-		return 1
+	[[ "${port}" =~ ^[0-9]+$ ]] || return 1
 
 	(( port >= 1 && port <= 65535 ))
 }
@@ -306,147 +295,84 @@ service_name_for_port() {
 }
 
 # ============================================================
-# RUTA UNIDAD FUENTE
+# EXTRAER PUERTO DESDE NOMBRE DE UNIDAD
 # ============================================================
 
-unit_source_path_for_port() {
+port_from_unit() {
 
-	local port="$1"
+	local unit="$1"
 
-	printf '%s/%s-%s.service' \
-		"${HCR_DIR}" \
-		"${SERVICE_NAME}" \
-		"${port}"
+	if [[ "${unit}" =~ ^${SERVICE_NAME}-([0-9]+)\.service$ ]]; then
+
+		printf '%s\n' "${BASH_REMATCH[1]}"
+
+		return 0
+
+	fi
+
+	return 1
 }
 
 # ============================================================
-# RUTA ENLACE SYSTEMD
-# ============================================================
-
-unit_link_path_for_port() {
-
-	local port="$1"
-
-	printf '%s/%s-%s.service' \
-		"${SYSTEMD_DIR}" \
-		"${SERVICE_NAME}" \
-		"${port}"
-}
-
-# ============================================================
-# OBTENER INSTANCIAS HCR
+# OBTENER TODAS LAS UNIDADES HCR
 # ============================================================
 
 get_existing_hcr_units() {
 
-	local unit=""
-	local units=""
+	systemctl list-unit-files \
+		--type=service \
+		--no-legend \
+		--no-pager \
+		2>/dev/null |
+	awk '{print $1}' |
+	grep -E "^${SERVICE_NAME}-[0-9]+\.service$" |
+	sort -V ||
+	true
+}
 
-	units="$(
-		systemctl list-unit-files \
-			--type=service \
-			--no-legend \
-			--no-pager \
-			2>/dev/null |
-		awk '{print $1}' |
-		grep -E '^hcr-server-[0-9]+\.service$' ||
-		true
-	)"
+# ============================================================
+# OBTENER INSTANCIAS ACTIVAS
+# ============================================================
+
+get_active_hcr_units() {
+
+	local unit=""
+	local active_state=""
 
 	while IFS= read -r unit; do
 
 		[[ -n "${unit}" ]] || continue
 
-		printf '%s\n' "${unit}"
-
-	done <<< "${units}"
-}
-
-# ============================================================
-# DETECTAR DIRECTORIO DESDE UNA UNIDAD
-# ============================================================
-
-detect_hcr_dir_from_unit() {
-
-	local unit="$1"
-	local fragment=""
-	local working_directory=""
-	local exec_start=""
-	local candidate=""
-	local binary_candidate=""
-
-	fragment="$(
-		systemctl show \
-			--property=FragmentPath \
-			--value \
-			"${unit}" \
-			2>/dev/null ||
-			true
-	)"
-
-	if [[ -n "${fragment}" &&
-		  -f "${fragment}" ]]; then
-
-		candidate="$(dirname -- "${fragment}")"
-
-		if [[ -f "${candidate}/hcr-server" ]]; then
-
-			printf '%s\n' "${candidate}"
-
-			return 0
-
-		fi
-
-		working_directory="$(
-			systemctl show \
-				--property=WorkingDirectory \
-				--value \
+		active_state="$(
+			systemctl is-active \
 				"${unit}" \
 				2>/dev/null ||
 				true
 		)"
 
-		if [[ -n "${working_directory}" &&
-			  -f "${working_directory}/hcr-server" ]]; then
+		if [[ "${active_state}" == "active" ]]; then
 
-			printf '%s\n' "${working_directory}"
-
-			return 0
+			printf '%s\n' "${unit}"
 
 		fi
 
-	fi
+	done < <(get_existing_hcr_units)
+}
 
-	exec_start="$(
-		systemctl show \
-			--property=ExecStart \
-			--value \
-			"${unit}" \
-			2>/dev/null ||
-			true
-	)"
+# ============================================================
+# OBTENER FRAGMENTPATH REAL
+# ============================================================
 
-	if [[ "${exec_start}" =~ (/[^[:space:]]*/hcr-server) ]]; then
+get_fragment_path() {
 
-		binary_candidate="${BASH_REMATCH[1]}"
+	local unit="$1"
 
-		if [[ -f "${binary_candidate}" ]]; then
-
-			candidate="$(dirname -- "${binary_candidate}")"
-
-			if [[ -f "${candidate}/hcr-server" ]]; then
-
-				printf '%s\n' "${candidate}"
-
-				return 0
-
-			fi
-
-		fi
-
-	fi
-
-	return 1
+	systemctl show \
+		--property=FragmentPath \
+		--value \
+		"${unit}" \
+		2>/dev/null ||
+	true
 }
 
 # ============================================================
@@ -456,29 +382,50 @@ detect_hcr_dir_from_unit() {
 detect_hcr_installation() {
 
 	local unit=""
-	local detected_dir=""
+	local fragment=""
 	local candidate=""
 	local candidates=()
 
 	# --------------------------------------------------------
-	# Primero: unidades HCR existentes.
+	# Primero buscar mediante las unidades reales.
 	# --------------------------------------------------------
 
 	while IFS= read -r unit; do
 
 		[[ -n "${unit}" ]] || continue
 
-		detected_dir="$(
-			detect_hcr_dir_from_unit "${unit}" 2>/dev/null ||
-			true
+		fragment="$(get_fragment_path "${unit}")"
+
+		if [[ -n "${fragment}" &&
+			  -f "${fragment}" ]]; then
+
+			candidate="$(dirname -- "${fragment}")"
+
+			if [[ -f "${candidate}/hcr-server" ]]; then
+
+				HCR_DIR="${candidate}"
+
+				break
+
+			fi
+
+		fi
+
+		# Revisar WorkingDirectory.
+
+		candidate="$(
+			systemctl show \
+				--property=WorkingDirectory \
+				--value \
+				"${unit}" \
+				2>/dev/null ||
+				true
 		)"
 
-		if [[ -n "${detected_dir}" ]]; then
+		if [[ -n "${candidate}" &&
+			  -f "${candidate}/hcr-server" ]]; then
 
-			HCR_DIR="${detected_dir}"
-
-			info \
-				"Instalación detectada mediante: ${unit}"
+			HCR_DIR="${candidate}"
 
 			break
 
@@ -487,7 +434,7 @@ detect_hcr_installation() {
 	done < <(get_existing_hcr_units)
 
 	# --------------------------------------------------------
-	# Segundo: ubicaciones conocidas.
+	# Ubicaciones conocidas.
 	# --------------------------------------------------------
 
 	if [[ -z "${HCR_DIR}" ]]; then
@@ -513,13 +460,17 @@ detect_hcr_installation() {
 
 	fi
 
+	# --------------------------------------------------------
+	# No se encontró instalación.
+	# --------------------------------------------------------
+
 	if [[ -z "${HCR_DIR}" ]]; then
 
 		fail \
 			"No se encontró una instalación HCR Server existente.
 
-Se buscó mediante las unidades systemd reales y en ubicaciones
-de instalación conocidas.
+Se revisaron las unidades systemd existentes y las ubicaciones
+conocidas de instalación.
 
 No se eliminará ningún archivo."
 
@@ -551,7 +502,6 @@ require_environment() {
 	for command_name in \
 		stat \
 		systemctl \
-		systemd-analyze \
 		flock \
 		rm \
 		sleep \
@@ -560,7 +510,8 @@ require_environment() {
 		grep \
 		dirname \
 		readlink \
-		journalctl
+		journalctl \
+		sort
 	do
 
 		require_command "${command_name}"
@@ -570,15 +521,20 @@ require_environment() {
 	if [[ ! -d "${SYSTEMD_DIR}" ]]; then
 
 		fail \
-			"No existe el directorio de systemd: ${SYSTEMD_DIR}"
+			"No existe el directorio de systemd:
+
+${SYSTEMD_DIR}"
 
 	fi
 
-	systemctl show \
+	if ! systemctl show \
 		--property=Version \
-		--value >/dev/null 2>&1 ||
+		--value >/dev/null 2>&1; then
+
 		fail \
 			"El administrador systemd no está disponible."
+
+	fi
 
 	detect_hcr_installation
 
@@ -607,9 +563,12 @@ acquire_remove_port_lock() {
 
 	local lock_file="${SYSTEMD_DIR}/.${SERVICE_NAME}.remove-port.lock"
 
-	exec 9>"${lock_file}" ||
+	if ! exec 9>"${lock_file}"; then
+
 		fail \
 			"No se pudo crear el bloqueo de HCR Server."
+
+	fi
 
 	if ! flock -n 9; then
 
@@ -635,63 +594,143 @@ release_remove_port_lock() {
 }
 
 # ============================================================
-# CONFIGURAR PUERTO
+# MOSTRAR PUERTOS ACTIVOS
 # ============================================================
 
-configure_port() {
+select_active_port() {
 
-	local input=""
+	local units=()
+	local unit=""
+	local port=""
+	local active_state=""
+	local index=1
+	local selection=""
 
-	section "Selección de la instancia"
+	section "Instancias HCR activas"
+
+	while IFS= read -r unit; do
+
+		[[ -n "${unit}" ]] || continue
+
+		units+=("${unit}")
+
+	done < <(get_active_hcr_units)
+
+	if (( ${#units[@]} == 0 )); then
+
+		fail \
+			"No se encontraron instancias HCR Server activas.
+
+No hay ningún puerto HCR activo para eliminar."
+
+	fi
+
+	printf '%b\n\n' \
+		"${WHITE}Selecciona el puerto que deseas eliminar:${RESET}"
+
+	for unit in "${units[@]}"; do
+
+		port="$(port_from_unit "${unit}")"
+
+		active_state="$(
+			systemctl is-active \
+				"${unit}" \
+				2>/dev/null ||
+				true
+		)"
+
+		printf '%b\n' \
+			"  ${BRIGHT_CYAN}${index})${RESET} ${BRIGHT_WHITE}Puerto ${port}${RESET} ${DIM}— ${unit} — ${active_state}${RESET}"
+
+		index=$((index + 1))
+
+	done
+
+	printf '\n'
 
 	while true; do
 
 		printf \
-			"${WHITE}Puerto HCR a eliminar${RESET} ${DIM}[ejemplo: 8880]${RESET}: "
+			"${WHITE}Opción [1-${#units[@]}]${RESET}: "
 
-		read -r input
+		read -r selection
 
-		if [[ -z "${input}" ]]; then
+		if [[ ! "${selection}" =~ ^[0-9]+$ ]]; then
 
 			error_message \
-				"Debes introducir un puerto."
+				"Debes seleccionar una opción numérica."
 
 			continue
 
 		fi
 
-		if ! validate_port "${input}"; then
+		if (( selection < 1 || selection > ${#units[@]} )); then
 
 			error_message \
-				"Puerto no válido. Debe estar entre 1 y 65535."
+				"Opción fuera de rango."
 
 			continue
 
 		fi
-
-		PORT="${input}"
 
 		break
 
 	done
 
-	SERVICE_NAME_SELECTED="$(service_name_for_port "${PORT}")"
-	UNIT_SOURCE="$(unit_source_path_for_port "${PORT}")"
-	UNIT_LINK="$(unit_link_path_for_port "${PORT}")"
+	SERVICE_NAME_SELECTED="${units[$((selection - 1))]}"
+
+	PORT="$(port_from_unit "${SERVICE_NAME_SELECTED}")"
+
+	UNIT_SOURCE="$(get_fragment_path "${SERVICE_NAME_SELECTED}")"
+
+	UNIT_LINK="${SYSTEMD_DIR}/${SERVICE_NAME_SELECTED}"
 
 	printf '\n'
 
 	success \
-		"Puerto seleccionado: ${PORT}"
+		"Instancia seleccionada."
 
 	detail \
-		"Servicio: ${SERVICE_NAME_SELECTED}.service"
+		"Puerto: ${PORT}"
 
 	detail \
-		"Unidad fuente: ${UNIT_SOURCE}"
+		"Servicio: ${SERVICE_NAME_SELECTED}"
 
 	detail \
-		"Enlace systemd: ${UNIT_LINK}"
+		"FragmentPath: ${UNIT_SOURCE}"
+
+	# --------------------------------------------------------
+	# Validar que el puerto sea correcto.
+	# --------------------------------------------------------
+
+	if ! validate_port "${PORT}"; then
+
+		fail \
+			"No se pudo determinar correctamente el puerto de la instancia."
+
+	fi
+
+	# --------------------------------------------------------
+	# Validar FragmentPath.
+	# --------------------------------------------------------
+
+	if [[ -z "${UNIT_SOURCE}" ]]; then
+
+		fail \
+			"systemd no devolvió el FragmentPath de:
+
+${SERVICE_NAME_SELECTED}"
+
+	fi
+
+	if [[ ! -e "${UNIT_SOURCE}" ]]; then
+
+		fail \
+			"El FragmentPath de la instancia no existe:
+
+${UNIT_SOURCE}"
+
+	fi
 }
 
 # ============================================================
@@ -702,66 +741,47 @@ validate_target_unit() {
 
 	local fragment=""
 	local exec_start=""
-	local expected_listen=""
 	local expected_service=""
 
 	section "Comprobando instancia seleccionada"
 
-	expected_service="${SERVICE_NAME_SELECTED}.service"
-	expected_listen="--listen :${PORT}"
+	expected_service="${SERVICE_NAME_SELECTED}"
 
 	# --------------------------------------------------------
-	# Comprobar unidad fuente.
+	# La unidad debe existir.
 	# --------------------------------------------------------
 
-	if [[ ! -f "${UNIT_SOURCE}" ||
-		  -L "${UNIT_SOURCE}" ]]; then
+	if [[ ! -e "${UNIT_SOURCE}" ]]; then
 
 		fail \
-			"No existe una unidad fuente válida para el puerto ${PORT}:
+			"No existe la unidad seleccionada:
 
 ${UNIT_SOURCE}"
 
 	fi
 
 	success \
-		"Unidad fuente encontrada."
+		"Unidad encontrada."
 
 	# --------------------------------------------------------
-	# Comprobar propietario.
+	# FragmentPath debe ser exactamente la unidad seleccionada.
 	# --------------------------------------------------------
 
-	if [[ "$(stat -c '%u' -- "${UNIT_SOURCE}")" != "0" ]]; then
+	fragment="$(get_fragment_path "${expected_service}")"
+
+	if [[ -z "${fragment}" ]]; then
 
 		fail \
-			"La unidad seleccionada no pertenece a root:
+			"systemd no devolvió FragmentPath para:
 
-${UNIT_SOURCE}"
+${expected_service}"
 
 	fi
 
-	success \
-		"La unidad pertenece a root."
-
-	# --------------------------------------------------------
-	# Comprobar FragmentPath.
-	# --------------------------------------------------------
-
-	fragment="$(
-		systemctl show \
-			--property=FragmentPath \
-			--value \
-			"${expected_service}" \
-			2>/dev/null ||
-			true
-	)"
-
-	if [[ -n "${fragment}" &&
-		  "${fragment}" != "${UNIT_SOURCE}" ]]; then
+	if [[ "${fragment}" != "${UNIT_SOURCE}" ]]; then
 
 		fail \
-			"systemd tiene una unidad ${expected_service}, pero su
-FragmentPath no coincide con la unidad esperada:
+			"El FragmentPath cambió inesperadamente.
 
 Esperado:
 ${UNIT_SOURCE}
@@ -771,8 +791,36 @@ ${fragment}"
 
 	fi
 
+	success \
+		"FragmentPath verificado."
+
 	# --------------------------------------------------------
-	# Comprobar ExecStart.
+	# Verificar propietario cuando sea un archivo normal.
+	# --------------------------------------------------------
+
+	if [[ -f "${UNIT_SOURCE}" &&
+		  ! -L "${UNIT_SOURCE}" ]]; then
+
+		if [[ "$(stat -c '%u' -- "${UNIT_SOURCE}")" != "0" ]]; then
+
+			fail \
+				"La unidad seleccionada no pertenece a root:
+
+${UNIT_SOURCE}"
+
+		fi
+
+		success \
+			"La unidad pertenece a root."
+
+	fi
+
+	# --------------------------------------------------------
+	# Verificar ExecStart.
+	#
+	# No se exige una cadena exacta porque systemd puede mostrar
+	# ExecStart con una representación diferente dependiendo de
+	# la versión de systemd.
 	# --------------------------------------------------------
 
 	exec_start="$(
@@ -786,25 +834,14 @@ ${fragment}"
 
 	if [[ -n "${exec_start}" ]]; then
 
-		if [[ "${exec_start}" != *"${expected_listen}"* ]]; then
-
-			fail \
-				"La instancia ${expected_service} no parece corresponder
-al puerto ${PORT}.
-
-ExecStart detectado:
-
-${exec_start}"
-
-		fi
-
-		success \
-			"ExecStart corresponde al puerto ${PORT}."
+		info \
+			"ExecStart detectado correctamente."
 
 	else
 
-		info \
-			"systemd no tiene ExecStart cargado actualmente."
+		warning \
+			"No se pudo obtener ExecStart; se continuará usando
+la identidad de la unidad y su FragmentPath."
 
 	fi
 }
@@ -823,42 +860,34 @@ show_target_status() {
 
 	active_state="$(
 		systemctl is-active \
-			"${SERVICE_NAME_SELECTED}.service" \
+			"${SERVICE_NAME_SELECTED}" \
 			2>/dev/null ||
 			true
 	)"
 
 	enabled_state="$(
 		systemctl is-enabled \
-			"${SERVICE_NAME_SELECTED}.service" \
+			"${SERVICE_NAME_SELECTED}" \
 			2>/dev/null ||
 			true
 	)"
 
-	fragment="$(
-		systemctl show \
-			--property=FragmentPath \
-			--value \
-			"${SERVICE_NAME_SELECTED}.service" \
-			2>/dev/null ||
-			true
-	)"
+	fragment="$(get_fragment_path "${SERVICE_NAME_SELECTED}")"
 
 	detail \
-		"Servicio: ${SERVICE_NAME_SELECTED}.service"
+		"Servicio: ${SERVICE_NAME_SELECTED}"
 
 	detail \
-		"Estado: ${active_state:-no-activo}"
+		"Puerto: ${PORT}"
 
 	detail \
-		"Inicio automático: ${enabled_state:-no-habilitado}"
+		"Estado: ${active_state:-desconocido}"
 
-	if [[ -n "${fragment}" ]]; then
+	detail \
+		"Inicio automático: ${enabled_state:-desconocido}"
 
-		detail \
-			"FragmentPath: ${fragment}"
-
-	fi
+	detail \
+		"FragmentPath: ${fragment:-no disponible}"
 
 	if [[ "${active_state}" == "active" ]]; then
 
@@ -867,8 +896,8 @@ show_target_status() {
 
 	else
 
-		info \
-			"La instancia no está activa."
+		warning \
+			"La instancia ya no aparece activa."
 
 	fi
 }
@@ -884,7 +913,11 @@ check_hcr_listener() {
 	ss -H -lnt 2>/dev/null |
 		awk -v port="${port}" '
 			{
-				if ($4 ~ (":" port "$")) {
+				address = $4
+
+				sub(/^.*:/, "", address)
+
+				if (address == port) {
 					found = 1
 					exit
 				}
@@ -912,7 +945,7 @@ stop_service() {
 
 	active_state="$(
 		systemctl is-active \
-			"${SERVICE_NAME_SELECTED}.service" \
+			"${SERVICE_NAME_SELECTED}" \
 			2>/dev/null ||
 			true
 	)"
@@ -930,7 +963,7 @@ stop_service() {
 		"Deteniendo HCR Server en puerto ${PORT}..."
 
 	if systemctl stop \
-		"${SERVICE_NAME_SELECTED}.service" >/dev/null 2>&1; then
+		"${SERVICE_NAME_SELECTED}" >/dev/null 2>&1; then
 
 		spinner_stop
 
@@ -949,7 +982,7 @@ stop_service() {
 		systemctl status \
 			--no-pager \
 			--full \
-			"${SERVICE_NAME_SELECTED}.service" ||
+			"${SERVICE_NAME_SELECTED}" ||
 			true
 
 		fail \
@@ -967,13 +1000,13 @@ disable_service() {
 	section "Deshabilitando inicio automático"
 
 	if systemctl is-enabled --quiet \
-		"${SERVICE_NAME_SELECTED}.service" >/dev/null 2>&1; then
+		"${SERVICE_NAME_SELECTED}" >/dev/null 2>&1; then
 
 		spinner_start \
 			"Deshabilitando inicio automático..."
 
 		if systemctl disable \
-			"${SERVICE_NAME_SELECTED}.service" >/dev/null 2>&1; then
+			"${SERVICE_NAME_SELECTED}" >/dev/null 2>&1; then
 
 			spinner_stop
 
@@ -1006,17 +1039,65 @@ remove_unit() {
 	section "Eliminando instancia HCR Server"
 
 	# --------------------------------------------------------
-	# Eliminar enlace systemd.
+	# Verificar nuevamente que la unidad siga siendo la misma.
+	# --------------------------------------------------------
+
+	local current_fragment=""
+
+	current_fragment="$(get_fragment_path "${SERVICE_NAME_SELECTED}")"
+
+	if [[ -n "${current_fragment}" &&
+		  "${current_fragment}" != "${UNIT_SOURCE}" ]]; then
+
+		fail \
+			"La unidad cambió durante la operación.
+
+Original:
+${UNIT_SOURCE}
+
+Actual:
+${current_fragment}"
+
+	fi
+
+	# --------------------------------------------------------
+	# Eliminar enlace / unidad en /etc/systemd/system.
 	# --------------------------------------------------------
 
 	if [[ -L "${UNIT_LINK}" ]]; then
 
-		if [[ "$(readlink -- "${UNIT_LINK}")" != "${UNIT_SOURCE}" ]]; then
+		local link_target=""
+
+		link_target="$(readlink -- "${UNIT_LINK}")"
+
+		# Resolver enlace relativo si fuera necesario.
+		if [[ "${link_target}" != /* ]]; then
+
+			link_target="$(
+				cd "$(dirname -- "${UNIT_LINK}")" &&
+				readlink -f -- "${link_target}"
+			)"
+
+		fi
+
+		local resolved_source=""
+
+		resolved_source="$(readlink -f -- "${UNIT_SOURCE}" 2>/dev/null || true)"
+
+		if [[ -n "${resolved_source}" &&
+			  -n "${link_target}" &&
+			  "${link_target}" != "${resolved_source}" ]]; then
 
 			fail \
-				"El enlace systemd no apunta a la unidad esperada:
+				"El enlace systemd no apunta a la unidad seleccionada:
 
-${UNIT_LINK}"
+${UNIT_LINK}
+
+Destino:
+${link_target}
+
+Esperado:
+${resolved_source}"
 
 		fi
 
@@ -1028,7 +1109,7 @@ ${UNIT_LINK}"
 			spinner_stop
 
 			success \
-				"Enlace eliminado."
+				"Enlace systemd eliminado."
 
 		else
 
@@ -1039,51 +1120,146 @@ ${UNIT_LINK}"
 
 		fi
 
+	elif [[ -f "${UNIT_LINK}" ]]; then
+
+		# Si el FragmentPath está directamente en /etc/systemd,
+		# UNIT_LINK y UNIT_SOURCE pueden ser el mismo archivo.
+		if [[ "${UNIT_LINK}" == "${UNIT_SOURCE}" ]]; then
+
+			info \
+				"La unidad está instalada directamente en systemd."
+
+		else
+
+			fail \
+				"Existe un archivo en ${UNIT_LINK}, pero no es un enlace
+simbólico y no coincide con la unidad seleccionada."
+
+		fi
+
 	elif [[ -e "${UNIT_LINK}" ]]; then
 
 		fail \
-			"Existe un archivo en la ruta del enlace systemd, pero no es
-un enlace simbólico:
+			"Existe un objeto no compatible en:
 
 ${UNIT_LINK}"
-
-	else
-
-		info \
-			"No existe un enlace systemd que eliminar."
 
 	fi
 
 	# --------------------------------------------------------
-	# Eliminar unidad fuente.
+	# Si la unidad fuente es diferente del enlace, eliminarla.
 	# --------------------------------------------------------
 
-	if [[ -f "${UNIT_SOURCE}" &&
-		  ! -L "${UNIT_SOURCE}" ]]; then
+	if [[ "${UNIT_SOURCE}" != "${UNIT_LINK}" ]]; then
 
-		spinner_start \
-			"Eliminando unidad HCR Server..."
+		if [[ -L "${UNIT_SOURCE}" ]]; then
 
-		if rm -f -- "${UNIT_SOURCE}"; then
+			spinner_start \
+				"Eliminando enlace de la unidad fuente..."
 
-			spinner_stop
+			if rm -f -- "${UNIT_SOURCE}"; then
 
-			success \
-				"Unidad fuente eliminada."
+				spinner_stop
+
+				success \
+					"Enlace de la unidad fuente eliminado."
+
+			else
+
+				spinner_stop
+
+				fail \
+					"No se pudo eliminar el enlace de la unidad fuente."
+
+			fi
+
+		elif [[ -f "${UNIT_SOURCE}" ]]; then
+
+			spinner_start \
+				"Eliminando unidad HCR Server..."
+
+			if rm -f -- "${UNIT_SOURCE}"; then
+
+				spinner_stop
+
+				success \
+					"Unidad HCR Server eliminada."
+
+			else
+
+				spinner_stop
+
+				fail \
+					"No se pudo eliminar la unidad HCR Server."
+
+			fi
+
+		elif [[ -e "${UNIT_SOURCE}" ]]; then
+
+			fail \
+				"La unidad fuente existe pero no es un archivo regular
+ni un enlace simbólico:
+
+${UNIT_SOURCE}"
 
 		else
 
-			spinner_stop
-
-			fail \
-				"No se pudo eliminar la unidad HCR Server."
+			info \
+				"La unidad fuente ya no existe."
 
 		fi
 
 	else
 
-		info \
-			"La unidad fuente ya no existe."
+		# La unidad estaba directamente en /etc/systemd/system.
+		if [[ -f "${UNIT_SOURCE}" ]]; then
+
+			spinner_start \
+				"Eliminando unidad HCR Server..."
+
+			if rm -f -- "${UNIT_SOURCE}"; then
+
+				spinner_stop
+
+				success \
+					"Unidad HCR Server eliminada."
+
+			else
+
+				spinner_stop
+
+				fail \
+					"No se pudo eliminar la unidad HCR Server."
+
+			fi
+
+		elif [[ -L "${UNIT_SOURCE}" ]]; then
+
+			spinner_start \
+				"Eliminando unidad HCR Server..."
+
+			if rm -f -- "${UNIT_SOURCE}"; then
+
+				spinner_stop
+
+				success \
+					"Unidad HCR Server eliminada."
+
+			else
+
+				spinner_stop
+
+				fail \
+					"No se pudo eliminar la unidad HCR Server."
+
+			fi
+
+		else
+
+			info \
+				"La unidad ya no existe."
+
+		fi
 
 	fi
 }
@@ -1116,7 +1292,7 @@ reload_systemd() {
 	fi
 
 	systemctl reset-failed \
-		"${SERVICE_NAME_SELECTED}.service" >/dev/null 2>&1 ||
+		"${SERVICE_NAME_SELECTED}" >/dev/null 2>&1 ||
 		true
 }
 
@@ -1133,18 +1309,19 @@ verify_removal() {
 	section "Verificación final"
 
 	# --------------------------------------------------------
-	# Unidad fuente
+	# Verificar archivo de unidad.
 	# --------------------------------------------------------
 
-	if [[ ! -e "${UNIT_SOURCE}" ]]; then
+	if [[ ! -e "${UNIT_SOURCE}" &&
+		  ! -L "${UNIT_SOURCE}" ]]; then
 
 		success \
-			"Unidad fuente eliminada."
+			"Unidad eliminada del sistema de archivos."
 
 	else
 
 		error_message \
-			"La unidad fuente todavía existe:
+			"La unidad todavía existe:
 
 ${UNIT_SOURCE}"
 
@@ -1153,19 +1330,19 @@ ${UNIT_SOURCE}"
 	fi
 
 	# --------------------------------------------------------
-	# Enlace
+	# Verificar enlace /etc/systemd/system.
 	# --------------------------------------------------------
 
 	if [[ ! -e "${UNIT_LINK}" &&
 		  ! -L "${UNIT_LINK}" ]]; then
 
 		success \
-			"Enlace systemd eliminado."
+			"La ruta de systemd quedó limpia."
 
 	else
 
 		error_message \
-			"El enlace systemd todavía existe:
+			"La unidad todavía existe en:
 
 ${UNIT_LINK}"
 
@@ -1174,17 +1351,10 @@ ${UNIT_LINK}"
 	fi
 
 	# --------------------------------------------------------
-	# FragmentPath
+	# Verificar FragmentPath.
 	# --------------------------------------------------------
 
-	fragment="$(
-		systemctl show \
-			--property=FragmentPath \
-			--value \
-			"${SERVICE_NAME_SELECTED}.service" \
-			2>/dev/null ||
-			true
-	)"
+	fragment="$(get_fragment_path "${SERVICE_NAME_SELECTED}")"
 
 	if [[ -z "${fragment}" ]]; then
 
@@ -1203,12 +1373,12 @@ ${fragment}"
 	fi
 
 	# --------------------------------------------------------
-	# Estado activo
+	# Estado activo.
 	# --------------------------------------------------------
 
 	active_state="$(
 		systemctl is-active \
-			"${SERVICE_NAME_SELECTED}.service" \
+			"${SERVICE_NAME_SELECTED}" \
 			2>/dev/null ||
 			true
 	)"
@@ -1226,12 +1396,12 @@ ${fragment}"
 		"La instancia ya no está activa."
 
 	# --------------------------------------------------------
-	# Estado enabled
+	# Estado enabled.
 	# --------------------------------------------------------
 
 	enabled_state="$(
 		systemctl is-enabled \
-			"${SERVICE_NAME_SELECTED}.service" \
+			"${SERVICE_NAME_SELECTED}" \
 			2>/dev/null ||
 			true
 	)"
@@ -1249,7 +1419,7 @@ ${fragment}"
 		"El inicio automático fue eliminado."
 
 	# --------------------------------------------------------
-	# Listener
+	# Listener.
 	# --------------------------------------------------------
 
 	if check_hcr_listener "${PORT}"; then
@@ -1282,7 +1452,7 @@ show_service_diagnostics() {
 		"Últimos registros de la instancia eliminada:"
 
 	journalctl \
-		-u "${SERVICE_NAME_SELECTED}.service" \
+		-u "${SERVICE_NAME_SELECTED}" \
 		-n 30 \
 		--no-pager \
 		--output=short-iso ||
@@ -1325,7 +1495,7 @@ show_summary() {
 		"  ${CYAN}${ICON_ARROW}${RESET} Puerto HCR       : ${BRIGHT_WHITE}${PORT}${RESET}"
 
 	printf '%b\n' \
-		"  ${CYAN}${ICON_ARROW}${RESET} Servicio          : ${BRIGHT_WHITE}${SERVICE_NAME_SELECTED}.service${RESET}"
+		"  ${CYAN}${ICON_ARROW}${RESET} Servicio          : ${BRIGHT_WHITE}${SERVICE_NAME_SELECTED}${RESET}"
 
 	printf '%b\n' \
 		"  ${CYAN}${ICON_ARROW}${RESET} Estado            : ${BRIGHT_GREEN}Eliminado${RESET}"
@@ -1336,15 +1506,12 @@ show_summary() {
 	printf '\n'
 
 	printf '%b\n' \
-		"${BOLD}${WHITE}Archivos eliminados:${RESET}"
+		"${BOLD}${WHITE}Unidad eliminada:${RESET}"
 
 	printf '\n'
 
 	printf '%b\n' \
-		"  ${CYAN}${ICON_ARROW}${RESET} Unidad : ${BRIGHT_WHITE}${UNIT_SOURCE}${RESET}"
-
-	printf '%b\n' \
-		"  ${CYAN}${ICON_ARROW}${RESET} Enlace : ${BRIGHT_WHITE}${UNIT_LINK}${RESET}"
+		"  ${CYAN}${ICON_ARROW}${RESET} FragmentPath : ${BRIGHT_WHITE}${UNIT_SOURCE}${RESET}"
 
 	printf '\n'
 
@@ -1354,10 +1521,10 @@ show_summary() {
 	printf '\n'
 
 	printf '%b\n' \
-		"  ${CYAN}${ICON_ARROW}${RESET} Binario     : ${BRIGHT_GREEN}Conservado${RESET}"
+		"  ${CYAN}${ICON_ARROW}${RESET} Binario        : ${BRIGHT_GREEN}Conservado${RESET}"
 
 	printf '%b\n' \
-		"  ${CYAN}${ICON_ARROW}${RESET} Certificados: ${BRIGHT_GREEN}Conservados${RESET}"
+		"  ${CYAN}${ICON_ARROW}${RESET} Certificados   : ${BRIGHT_GREEN}Conservados${RESET}"
 
 	printf '%b\n' \
 		"  ${CYAN}${ICON_ARROW}${RESET} Otras instancias: ${BRIGHT_GREEN}Sin modificar${RESET}"
@@ -1394,7 +1561,7 @@ cleanup() {
 
 	spinner_stop
 
-	if [[ -n "${TEMP_UNIT}" ]]; then
+	if [[ -n "${TEMP_UNIT:-}" ]]; then
 
 		rm -f \
 			-- "${TEMP_UNIT}" >/dev/null 2>&1 ||
@@ -1402,7 +1569,7 @@ cleanup() {
 
 	fi
 
-	if [[ "${LOCK_FD_OPEN}" == "true" ]]; then
+	if [[ "${LOCK_FD_OPEN:-false}" == "true" ]]; then
 
 		release_remove_port_lock
 
@@ -1438,6 +1605,9 @@ main() {
 		info \
 			"Instalación HCR detectada: ${HCR_DIR}"
 
+		info \
+			"Binario HCR: ${BINARY_PATH}"
+
 	else
 
 		spinner_stop
@@ -1471,10 +1641,10 @@ main() {
 	fi
 
 	# --------------------------------------------------------
-	# PUERTO
+	# SELECCIÓN
 	# --------------------------------------------------------
 
-	configure_port
+	select_active_port
 
 	# --------------------------------------------------------
 	# VALIDAR UNIDAD
@@ -1495,30 +1665,30 @@ main() {
 	section "Resumen de eliminación"
 
 	detail \
-		"Instancia: ${SERVICE_NAME_SELECTED}.service"
+		"Instancia: ${SERVICE_NAME_SELECTED}"
 
 	detail \
 		"Puerto HCR: ${PORT}"
 
 	detail \
-		"Unidad fuente: ${UNIT_SOURCE}"
+		"Unidad real: ${UNIT_SOURCE}"
 
 	detail \
-		"Enlace systemd: ${UNIT_LINK}"
+		"Ruta systemd: ${UNIT_LINK}"
 
 	detail \
 		"Binario HCR: ${BINARY_PATH}"
 
 	detail \
-		"Frame de descarga original: ${MAX_DOWNLOAD_FRAME}"
+		"Frame de descarga de referencia: ${MAX_DOWNLOAD_FRAME}"
 
 	detail \
-		"Poll timeout original: ${DOWNLOAD_POLL_TIMEOUT}"
+		"Poll timeout de referencia: ${DOWNLOAD_POLL_TIMEOUT}"
 
 	printf '\n'
 
 	warning \
-		"Se eliminará únicamente la instancia ${SERVICE_NAME_SELECTED}.service."
+		"Se eliminará únicamente la instancia ${SERVICE_NAME_SELECTED}."
 
 	warning \
 		"El binario HCR Server NO será eliminado."
@@ -1537,14 +1707,18 @@ main() {
 	case "${answer,,}" in
 
 		s|si|sí|y|yes)
+
 			printf '\n'
+
 			;;
 
 		*)
+
 			info \
 				"Operación cancelada."
 
 			exit 0
+
 			;;
 
 	esac
