@@ -22,8 +22,9 @@ set -euo pipefail
 #       └── Eliminar puerto
 #   04  Optimizar protocolo
 #   05  Reiniciar servicio
+#   06  Estado de puertos
 #
-# Detecta por instancia:
+# DETECCIÓN POR INSTANCIA:
 #
 #   - Puerto HCR
 #   - Puerto destino
@@ -187,40 +188,6 @@ spinner_stop() {
 }
 
 # ============================================================
-# HEADER
-# ============================================================
-
-header() {
-
-    clear_screen
-
-    echo
-    echo -e "${CYAN}    ╭────────────────────────────────────────────────────────╮${RESET}"
-    echo -e "${CYAN}    │                                                        │${RESET}"
-    echo -e "${CYAN}    │${BOLD}${WHITE}       H C R   S E R V E R${RESET}                              ${CYAN}│${RESET}"
-    echo -e "${CYAN}    │${GRAY}       Premium Control Panel${RESET}                            ${CYAN}│${RESET}"
-    echo -e "${CYAN}    │                                                        │${RESET}"
-    echo -e "${CYAN}    ├────────────────────────────────────────────────────────┤${RESET}"
-
-    local count
-    count="$(count_hcr_instances)"
-
-    if (( count > 0 )); then
-
-        echo -e "${CYAN}    │${RESET}  ${GREEN}●${RESET} Instancias HCR: ${WHITE}${count}${RESET}                                  ${CYAN}│${RESET}"
-
-    else
-
-        echo -e "${CYAN}    │${RESET}  ${YELLOW}●${RESET} Instancias HCR: ${WHITE}0${RESET}                                  ${CYAN}│${RESET}"
-
-    fi
-
-    echo -e "${CYAN}    ╰────────────────────────────────────────────────────────╯${RESET}"
-
-    echo
-}
-
-# ============================================================
 # OBTENER UNIDADES HCR
 # ============================================================
 
@@ -252,10 +219,106 @@ get_hcr_units() {
 
 count_hcr_instances() {
 
-    get_hcr_units |
+    local count
+
+    count="$(
+        get_hcr_units |
         grep -E '^hcr-server(-[0-9]+)?\.service$' |
         wc -l |
         tr -d ' '
+    )"
+
+    echo "${count:-0}"
+}
+
+# ============================================================
+# ESTADO GENERAL DE HCR
+# ============================================================
+
+hcr_is_installed() {
+
+    local count
+
+    count="$(count_hcr_instances)"
+
+    if [[ "$count" =~ ^[0-9]+$ ]] && (( count > 0 )); then
+        return 0
+    fi
+
+    return 1
+}
+
+# ============================================================
+# LISTAR PUERTOS
+# ============================================================
+
+get_hcr_ports() {
+
+    local units
+    local unit
+    local path
+    local port
+
+    units="$(get_hcr_units)"
+
+    [[ -n "$units" ]] || return 0
+
+    while IFS= read -r unit; do
+
+        [[ -n "$unit" ]] || continue
+
+        path="$(get_unit_path "$unit")"
+        port="$(get_unit_listen_port "$unit" "$path")"
+
+        if [[ -n "$port" ]]; then
+            echo "$port"
+        fi
+
+    done <<< "$units" |
+    sort -n -u
+}
+
+# ============================================================
+# HEADER
+# ============================================================
+
+header() {
+
+    clear_screen
+
+    local count
+    local installed
+    local ports
+    local port_line
+
+    count="$(count_hcr_instances)"
+
+    if hcr_is_installed; then
+        installed="${GREEN}Instalado${RESET} 🟢"
+    else
+        installed="${RED}No Instalado${RESET} 🔴"
+    fi
+
+    ports="$(get_hcr_ports | paste -sd ', ' -)"
+
+    if [[ -z "$ports" ]]; then
+        port_line="${GRAY}---${RESET}"
+    else
+        port_line="${WHITE}${ports}${RESET}"
+    fi
+
+    echo
+    echo -e "${CYAN}    ╭────────────────────────────────────────────────────────╮${RESET}"
+    echo -e "${CYAN}    │                                                        │${RESET}"
+    echo -e "${CYAN}    │${BOLD}${WHITE}       H C R   S E R V E R${RESET}                              ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │${GRAY}       Premium Control Panel${RESET}                            ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │                                                        │${RESET}"
+    echo -e "${CYAN}    ├────────────────────────────────────────────────────────┤${RESET}"
+    echo -e "${CYAN}    │${RESET}  ${WHITE}HCR:${RESET} ${installed}                                      ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │${RESET}  ${WHITE}Instancias HCR:${RESET} ${GREEN}${count}${RESET}                                ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │${RESET}  ${WHITE}Puertos:${RESET} ${port_line}                              ${CYAN}│${RESET}"
+    echo -e "${CYAN}    ╰────────────────────────────────────────────────────────╯${RESET}"
+    echo
 }
 
 # ============================================================
@@ -504,6 +567,7 @@ show_instances() {
     local frame
     local timeout
     local transport
+    local state_display
 
     while IFS= read -r unit; do
 
@@ -552,7 +616,7 @@ show_instances() {
 
     echo
     detail "Destino = redirección local 127.0.0.1:PUERTO"
-    detail "Estado ACTIVO = systemd activo y puerto realmente escuchando."
+    detail "ACTIVO = systemd activo y puerto realmente escuchando."
 }
 
 # ============================================================
@@ -580,6 +644,7 @@ select_hcr_unit() {
     local path
     local port
     local state
+    local state_display
 
     declare -a UNIT_ARRAY
 
@@ -1184,7 +1249,7 @@ delete_port() {
 }
 
 # ============================================================
-# CREAR OPTIMIZADOR COMPATIBLE CON INSTANCIAS
+# PREPARAR OPTIMIZADOR
 # ============================================================
 
 prepare_instance_optimizer() {
@@ -1211,24 +1276,10 @@ prepare_instance_optimizer() {
         return 1
     fi
 
-    # --------------------------------------------------------
-    # Adaptar la unidad objetivo.
-    #
-    # El optimize.sh original utiliza:
-    #
-    # UNIT_PATH=/etc/systemd/system/hcr-server.service
-    #
-    # Aquí se reemplaza por la unidad seleccionada.
-    # --------------------------------------------------------
-
     sed -E \
         -i \
         "s#^UNIT_PATH=.*#UNIT_PATH=\"${unit_path}\"#" \
         "$OPTIMIZE_SCRIPT"
-
-    # --------------------------------------------------------
-    # Adaptar SERVICE_NAME para la instancia.
-    # --------------------------------------------------------
 
     sed -E \
         -i \
