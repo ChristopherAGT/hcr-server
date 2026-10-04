@@ -131,16 +131,34 @@ prepare_install_dir() {
 # ============================================================
 # SPINNER
 # ============================================================
+# CORREGIDO:
+#
+# - Detecta si existe un spinner anterior.
+# - Si el PID anterior ya murió, limpia la variable.
+# - Usa TERM para cerrar correctamente el proceso.
+# - El proceso del spinner tiene trap para terminar limpiamente.
+# - spinner_stop espera al proceso antes de continuar.
+# - Limpia completamente la línea anterior.
+# ============================================================
 
 spinner_start() {
 
     local message="${1:-Procesando}"
 
+    # Si existe un PID anterior, comprobar si sigue vivo.
     if [[ -n "${SPINNER_PID:-}" ]]; then
-        return 0
+
+        if kill -0 "${SPINNER_PID}" >/dev/null 2>&1; then
+            return 0
+        fi
+
+        # El proceso anterior ya no existe.
+        SPINNER_PID=""
     fi
 
     (
+        trap 'exit 0' TERM INT HUP
+
         local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
         local i=0
 
@@ -162,16 +180,24 @@ spinner_start() {
 
 spinner_stop() {
 
-    if [[ -n "${SPINNER_PID:-}" ]]; then
+    local pid="${SPINNER_PID:-}"
 
-        kill "${SPINNER_PID}" >/dev/null 2>&1 || true
+    # Limpiar inmediatamente el PID para impedir
+    # que otro spinner reutilice un proceso viejo.
+    SPINNER_PID=""
 
-        wait "${SPINNER_PID}" 2>/dev/null || true
+    if [[ -n "$pid" ]]; then
 
-        SPINNER_PID=""
+        # TERM permite que el trap del spinner cierre
+        # correctamente el proceso.
+        kill -TERM "$pid" >/dev/null 2>&1 || true
+
+        # Esperar a que realmente termine.
+        wait "$pid" >/dev/null 2>&1 || true
     fi
 
-    printf "\r\033[K"
+    # Limpiar completamente la línea del spinner.
+    printf "\r\033[2K"
 }
 
 # ============================================================
@@ -1631,7 +1657,7 @@ show_menu() {
 
     printf "  ${CYAN}01${RESET}  ${MAGENTA}➤${RESET}  ${WHITE}%-24s${RESET}\n" \
         "Instalar / reinstalar"
-    echo -e "      ${GRAY}Instala o actualiza HCR Server${RESET}"
+    echo -e "      ${GRAY}Instala o Actualiza HCR Server${RESET}"
     echo
 
     printf "  ${CYAN}02${RESET}  ${MAGENTA}◈${RESET}  ${WHITE}%-24s${RESET}\n" \
@@ -1645,23 +1671,23 @@ show_menu() {
     echo
 
     printf "  ${CYAN}04${RESET}  ${MAGENTA}◉${RESET}  ${WHITE}%-24s${RESET}\n" \
-        "Estados de puerto"
+        "Estados de puertos"
     echo -e "      ${GRAY}Muestra el estado real de todas las instancias${RESET}"
     echo
 
     printf "  ${CYAN}05${RESET}  ${MAGENTA}↕${RESET}  ${WHITE}%-24s${RESET}\n" \
         "Iniciar / Detener Servicio"
-    echo -e "      ${GRAY}Inicia o detiene una instancia HCR${RESET}"
+    echo -e "      ${GRAY}Inicia o detiene el Servicio HCR por completo.${RESET}"
     echo
 
     printf "  ${CYAN}06${RESET}  ${MAGENTA}↻${RESET}  ${WHITE}%-24s${RESET}\n" \
         "Reiniciar Servicio"
-    echo -e "      ${GRAY}Reinicia una instancia y valida su puerto${RESET}"
+    echo -e "      ${GRAY}Reinicia el Servicio HCR por completo.${RESET}"
     echo
 
     printf "  ${CYAN}07${RESET}  ${MAGENTA}⚙${RESET}  ${WHITE}%-24s${RESET}\n" \
         "Optimizar HCR"
-    echo -e "      ${GRAY}Ajusta el rendimiento de una instancia${RESET}"
+    echo -e "      ${GRAY}Ajusta el rendimiento del Protocolo.${RESET}"
     echo
 
     echo -e "  ${DARK}────────────────────────────────────────────────────────${RESET}"
