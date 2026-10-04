@@ -16,6 +16,7 @@ set -u
 #   - Muestra Max Download Frame.
 #   - Muestra Download Poll Timeout.
 #   - Muestra el transporte.
+#   - Muestra PID/proceso cuando está disponible.
 #   - Permite actualizar la información.
 #
 # NO:
@@ -389,6 +390,7 @@ get_port_process() {
         awk -v port="$port" '
             {
                 address = $4
+
                 sub(/^.*:/, "", address)
 
                 if (address == port) {
@@ -444,40 +446,72 @@ get_real_state() {
 }
 
 # ============================================================
-# MOSTRAR ESTADO VISUAL
+# MOSTRAR COLUMNA DE ESTADO
 # ============================================================
 
-print_state() {
+print_state_column() {
 
     local state="$1"
+
+    local state_color
+    local state_text
+    local state_visible_length
+    local state_padding
 
     case "$state" in
 
         ACTIVO)
-            echo -e "${GREEN}● ACTIVO${RESET}"
+            state_color="$GREEN"
+            state_text="● ACTIVO"
             ;;
 
         SIN\ ESCUCHA)
-            echo -e "${YELLOW}● SIN ESCUCHA${RESET}"
+            state_color="$YELLOW"
+            state_text="● SIN ESCUCHA"
             ;;
 
         ERROR)
-            echo -e "${RED}● ERROR${RESET}"
+            state_color="$RED"
+            state_text="● ERROR"
             ;;
 
         INICIANDO)
-            echo -e "${CYAN}● INICIANDO${RESET}"
+            state_color="$CYAN"
+            state_text="● INICIANDO"
             ;;
 
         DETENIENDO)
-            echo -e "${YELLOW}● DETENIENDO${RESET}"
+            state_color="$YELLOW"
+            state_text="● DETENIENDO"
             ;;
 
         *)
-            echo -e "${GRAY}● DETENIDO${RESET}"
+            state_color="$GRAY"
+            state_text="● DETENIDO"
             ;;
 
     esac
+
+    printf "${state_color}%s${RESET}" "$state_text"
+
+    # ========================================================
+    # ALINEACIÓN DE DATOS
+    # ========================================================
+    #
+    # Los datos utilizan 18 posiciones para ESTADO.
+    # FRAME, TIMEOUT y TRANSP. permanecen compactos.
+    #
+    # ========================================================
+
+    state_visible_length="${#state_text}"
+
+    state_padding=$((18 - state_visible_length))
+
+    if (( state_padding > 0 )); then
+        printf "%*s" "$state_padding" ""
+    fi
+
+    printf " "
 }
 
 # ============================================================
@@ -513,12 +547,26 @@ show_status() {
     if [[ -z "$units" ]]; then
 
         warning "No se detectaron instancias HCR Server."
+
         echo
 
         return 0
     fi
 
-    printf "  ${GRAY}%-3s %-16s %-9s %-11s %-16s %-10s %-10s %-10s${RESET}\n" \
+    # ========================================================
+    # ENCABEZADOS
+    # ========================================================
+    #
+    # ESTADO mantiene 18 posiciones para conservar
+    # la alineación general de la tabla.
+    #
+    # FRAME, TIMEOUT y TRANSP. se desplazan
+    # ligeramente hacia la izquierda mediante
+    # un ajuste visual independiente.
+    #
+    # ========================================================
+
+    printf "  ${GRAY}%-3s %-16s %-9s %-11s %-16s %-11s %-11s %-10s${RESET}\n" \
         "#" \
         "INSTANCIA" \
         "PUERTO" \
@@ -578,16 +626,47 @@ show_status() {
 
         esac
 
+        # ====================================================
+        # COLUMNAS
+        # ====================================================
+
         printf "  ${CYAN}%-3s${RESET} " "$index"
-        printf "${WHITE}%-16s${RESET} " "${unit%.service}"
-        printf "${WHITE}%-9s${RESET} " "${port:----}"
-        printf "${WHITE}%-11s${RESET} " "${target:----}"
 
-        printf "%-16b " "$(print_state "$state")"
+        printf "${WHITE}%-16s${RESET} " \
+            "${unit%.service}"
 
-        printf "${WHITE}%-10s${RESET} " "${frame:----}"
-        printf "${WHITE}%-10s${RESET} " "${timeout:----}"
-        printf "${WHITE}%-10s${RESET}\n" "${transport:----}"
+        printf "${WHITE}%-9s${RESET} " \
+            "${port:----}"
+
+        printf "${WHITE}%-11s${RESET} " \
+            "${target:----}"
+
+        # ====================================================
+        # ESTADO
+        # ====================================================
+
+        print_state_column "$state"
+
+        # ====================================================
+        # FRAME
+        # ====================================================
+
+        printf "${WHITE}%-11s${RESET} " \
+            "${frame:----}"
+
+        # ====================================================
+        # TIMEOUT
+        # ====================================================
+
+        printf "${WHITE}%-11s${RESET} " \
+            "${timeout:----}"
+
+        # ====================================================
+        # TRANSPORTE
+        # ====================================================
+
+        printf "${WHITE}%-10s${RESET}\n" \
+            "${transport:----}"
 
     done <<< "$units"
 
@@ -651,6 +730,7 @@ show_port_details() {
         [[ -n "$unit" ]] || continue
 
         path="$(get_unit_path "$unit")"
+
         port="$(get_unit_listen_port "$path")"
 
         [[ -n "$port" ]] || continue
@@ -683,23 +763,15 @@ header() {
     clear_screen
 
     echo
+
     echo -e "${CYAN}    ╭──────────────────────────────────────────────────────────────╮${RESET}"
     echo -e "${CYAN}    │                                                              │${RESET}"
     echo -e "${CYAN}    │${BOLD}${WHITE}          H C R   S E R V E R${RESET}                              ${CYAN}│${RESET}"
     echo -e "${CYAN}    │${GRAY}             Estado de Puertos${RESET}                             ${CYAN}│${RESET}"
     echo -e "${CYAN}    │                                                              │${RESET}"
     echo -e "${CYAN}    ╰──────────────────────────────────────────────────────────────╯${RESET}"
-    echo
-}
-
-# ============================================================
-# ESPERA
-# ============================================================
-
-pause() {
 
     echo
-    read -rp "  Presiona ENTER para actualizar..." _
 }
 
 # ============================================================
@@ -709,6 +781,7 @@ pause() {
 main() {
 
     require_root
+
     check_dependencies
 
     while true; do
@@ -726,8 +799,10 @@ main() {
         line
 
         echo
+
         echo -e "  ${CYAN}ENTER${RESET}  Actualizar estado"
         echo -e "  ${GRAY}0${RESET}      Salir"
+
         echo
 
         read -rp "  HCR / ESTADO › " option
@@ -737,10 +812,13 @@ main() {
             0|00|q|Q|exit|EXIT)
 
                 echo
+
                 echo -e "  ${CYAN}HCR${RESET} ${GRAY}›${RESET} ${WHITE}Cerrando monitor...${RESET}"
+
                 echo
 
                 exit 0
+
                 ;;
 
             *)
