@@ -250,11 +250,15 @@ check_hcr_listener() {
 
 	[ -n "${listeners}" ] || return 1
 
+	echo "${listeners}" | grep -q '"hcr-server"' ||
+		echo "${listeners}" | grep -q 'hcr-server' ||
+		return 1
+
 	return 0
 }
 
 # ------------------------------------------------------------
-# CONFIGURAR CAPACIDAD DE PUERTO PRIVILEGIADO
+# PUERTOS PRIVILEGIADOS
 # ------------------------------------------------------------
 
 requires_privileged_port_capability() {
@@ -351,7 +355,9 @@ require_environment() {
 		mktemp \
 		sleep \
 		ss \
-		tail
+		tail \
+		grep \
+		journalctl
 	do
 		require_command "${command_name}"
 	done
@@ -588,11 +594,7 @@ render_unit() {
 	fi
 
 	# --------------------------------------------------------
-	# PUERTOS PRIVILEGIADOS
-	#
-	# Los puertos 1-1023 requieren CAP_NET_BIND_SERVICE.
-	#
-	# Se concede únicamente esa capacidad cuando es necesaria.
+	# CAPACIDAD PARA PUERTOS 1-1023
 	# --------------------------------------------------------
 
 	if requires_privileged_port_capability "${PORT}"; then
@@ -715,8 +717,9 @@ cleanup() {
 	trap - EXIT
 	set +e
 
-	[ -n "${TEMP_UNIT}" ] &&
+	if [ -n "${TEMP_UNIT}" ]; then
 		rm -f -- "${TEMP_UNIT}"
+	fi
 
 	exit "${exit_code}"
 }
@@ -874,6 +877,7 @@ install_service() {
 		spinner_stop fail
 
 		printf "\n"
+
 		systemctl status \
 			--no-pager \
 			--full \
@@ -923,11 +927,13 @@ install_service() {
 		spinner_stop fail
 
 		printf "\n"
+
 		error_message "La comprobación de estabilidad falló."
 
 		printf "\n"
 
 		detail "Estado del servicio:"
+
 		systemctl status \
 			--no-pager \
 			--full \
@@ -936,6 +942,7 @@ install_service() {
 		printf "\n"
 
 		detail "Últimos registros de HCR Server:"
+
 		journalctl \
 			-u "${SERVICE_NAME}.service" \
 			-n 30 \
@@ -971,6 +978,7 @@ show_summary() {
 	clear_screen
 
 	printf "\n"
+
 	printf "${BRIGHT_GREEN}${BOLD}"
 	printf "╔════════════════════════════════════════════════════════════╗\n"
 	printf "║                                                            ║\n"
@@ -996,6 +1004,9 @@ show_summary() {
 	printf "  ${CYAN}${ICON_ARROW}${RESET} Frame descarga : ${BRIGHT_WHITE}%s${RESET}\n" \
 		"${MAX_DOWNLOAD_FRAME}"
 
+	printf "  ${CYAN}${ICON_ARROW}${RESET} Poll timeout   : ${BRIGHT_WHITE}%s${RESET}\n" \
+		"${DOWNLOAD_POLL_TIMEOUT}"
+
 	printf "  ${CYAN}${ICON_ARROW}${RESET} File descriptors: ${BRIGHT_WHITE}16384${RESET}\n"
 
 	printf "  ${CYAN}${ICON_ARROW}${RESET} Tasks máximas  : ${BRIGHT_WHITE}1024${RESET}\n"
@@ -1016,8 +1027,11 @@ show_summary() {
 
 	printf "${BOLD}${WHITE}Rutas:${RESET}\n\n"
 
-	printf "  ${DIM}Binario :${RESET} %s\n" "${BINARY_PATH}"
-	printf "  ${DIM}Unidad  :${RESET} %s\n" "${UNIT_SOURCE_PATH}"
+	printf "  ${DIM}Binario :${RESET} %s\n" \
+		"${BINARY_PATH}"
+
+	printf "  ${DIM}Unidad  :${RESET} %s\n" \
+		"${UNIT_SOURCE_PATH}"
 
 	printf "\n"
 
@@ -1071,54 +1085,3 @@ trap cleanup EXIT
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	main "$@"
 fi
-
-Qué cambia específicamente al elegir "80"
-
-Ahora la unidad generada será conceptualmente:
-
-User=root
-Group=root
-
-NoNewPrivileges=true
-
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-
-Eso permite que:
-
-hcr-server → :80
-
-pueda hacer el "bind()" correctamente, sin quitar las demás restricciones de seguridad.
-
-Y si eliges, por ejemplo, "8080", volverá a generar:
-
-CapabilityBoundingSet=
-AmbientCapabilities=
-
-porque para "8080" no necesita esa capacidad.
-
-Un detalle importante de tu prueba anterior
-
-Tu "ss" mostraba:
-
-*:8080  users:(("bilola-server"...))
-
-Eso significa que 8080 está ocupado por Bilola, mientras que el "80" aparentemente estaba libre. Por eso "80" es una elección razonable para HCR si realmente quieres usarlo.
-
-Después de instalar con "80", la comprobación correcta debería terminar mostrando algo equivalente a:
-
-✔ HCR Server está activo
-✔ Directorio de trabajo verificado
-✔ Realizando comprobación de estabilidad...
-✔ Completado
-✔ HCR Server está escuchando correctamente en el puerto 80
-
-Y puedes comprobarlo manualmente con:
-
-systemctl status hcr-server --no-pager -l
-
-y:
-
-ss -lntp | grep ':80'
-
-Deberías ver "hcr-server" escuchando en "*:80".
