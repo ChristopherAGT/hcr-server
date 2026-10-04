@@ -216,6 +216,25 @@ validate_port() {
 	(( port >= 1 && port <= 65535 ))
 }
 
+check_port_available() {
+	local port="$1"
+	local listeners
+
+	listeners="$(
+		ss -lntp "sport = :${port}" 2>/dev/null || true
+	)"
+
+	if [ -z "${listeners}" ]; then
+		return 0
+	fi
+
+	if echo "${listeners}" | grep -q '"hcr-server"'; then
+		return 0
+	fi
+
+	return 1
+}
+
 configure_ports() {
 	local input
 
@@ -226,15 +245,21 @@ configure_ports() {
 		read -r input
 
 		if [ -z "${input}" ]; then
-			break
+			input="${PORT}"
 		fi
 
-		if validate_port "${input}"; then
-			PORT="${input}"
-			break
+		if ! validate_port "${input}"; then
+			error_message "Puerto no válido. Debe estar entre 1 y 65535."
+			continue
 		fi
 
-		error_message "Puerto no válido. Debe estar entre 1 y 65535."
+		if ! check_port_available "${input}"; then
+			error_message "El puerto ${input} ya está siendo utilizado por otro servicio."
+			continue
+		fi
+
+		PORT="${input}"
+		break
 	done
 
 	success "Puerto HCR configurado: ${PORT}"
@@ -282,7 +307,8 @@ require_environment() {
 		ln \
 		mv \
 		mktemp \
-		sleep
+		sleep \
+		ss
 	do
 		require_command "${command_name}"
 	done
@@ -721,6 +747,15 @@ install_service() {
 
 	systemctl reset-failed \
 		"${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+
+	spinner_start "Comprobando disponibilidad del puerto HCR..."
+
+	if check_port_available "${PORT}"; then
+		spinner_stop ok
+	else
+		spinner_stop fail
+		fail "El puerto HCR ${PORT} está siendo utilizado por otro servicio."
+	fi
 
 	spinner_start "Iniciando HCR Server..."
 
