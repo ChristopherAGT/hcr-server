@@ -123,10 +123,43 @@ ICON_DOT="•"
 # ============================================================
 
 SPINNER_PID=""
+SPINNER_TTY=""
 
 spinner_start() {
 
 	local message="$1"
+
+	# --------------------------------------------------------
+	# Evitar múltiples spinners simultáneos.
+	# --------------------------------------------------------
+
+	if [[ -n "${SPINNER_PID}" ]]; then
+
+		if kill -0 "${SPINNER_PID}" >/dev/null 2>&1; then
+
+			return 0
+
+		fi
+
+		SPINNER_PID=""
+
+	fi
+
+	# --------------------------------------------------------
+	# Utilizar la terminal real cuando esté disponible.
+	# Esto evita que las redirecciones de stdout interfieran
+	# con el spinner.
+	# --------------------------------------------------------
+
+	if [[ -w /dev/tty ]]; then
+
+		SPINNER_TTY="/dev/tty"
+
+	else
+
+		SPINNER_TTY="/dev/stdout"
+
+	fi
 
 	(
 		local frames=(
@@ -147,7 +180,8 @@ spinner_start() {
 		while true; do
 
 			printf '\r%b' \
-				"${BRIGHT_CYAN}${frames[$i]}${RESET} ${WHITE}${message}${RESET}"
+				"${BRIGHT_CYAN}${frames[$i]}${RESET} ${WHITE}${message}${RESET}" \
+				>"${SPINNER_TTY}"
 
 			i=$(( (i + 1) % ${#frames[@]} ))
 
@@ -158,21 +192,36 @@ spinner_start() {
 	) &
 
 	SPINNER_PID=$!
+
+	disown "${SPINNER_PID}" 2>/dev/null || true
 }
 
 spinner_stop() {
 
-	if [[ -n "${SPINNER_PID}" ]]; then
+	local pid="${SPINNER_PID}"
 
-		kill "${SPINNER_PID}" >/dev/null 2>&1 || true
+	SPINNER_PID=""
 
-		wait "${SPINNER_PID}" 2>/dev/null || true
+	if [[ -n "${pid}" ]]; then
 
-		SPINNER_PID=""
+		if kill -0 "${pid}" >/dev/null 2>&1; then
+
+			kill "${pid}" >/dev/null 2>&1 || true
+
+		fi
+
+		wait "${pid}" 2>/dev/null || true
 
 	fi
 
-	printf '\r\033[K'
+	if [[ -n "${SPINNER_TTY}" ]]; then
+
+		printf '\r\033[K' >"${SPINNER_TTY}" 2>/dev/null || true
+
+	fi
+
+	SPINNER_TTY=""
+
 }
 
 run_spinner() {
@@ -430,18 +479,6 @@ check_hcr_listener() {
 # ============================================================
 # OBTENER INSTANCIAS HCR REGISTRADAS EN SYSTEMD
 # ============================================================
-#
-# IMPORTANTE:
-#
-# No se supone que existan:
-#
-#   hcr-server-80.service
-#   hcr-server-443.service
-#
-# Se consulta dinámicamente systemd para descubrir las unidades
-# que realmente existen.
-#
-# ============================================================
 
 get_existing_hcr_units() {
 
@@ -481,10 +518,6 @@ detect_hcr_dir_from_unit() {
 	local candidate=""
 	local binary_candidate=""
 
-	# --------------------------------------------------------
-	# Obtener FragmentPath.
-	# --------------------------------------------------------
-
 	fragment="$(
 		systemctl show \
 			--property=FragmentPath \
@@ -498,11 +531,6 @@ detect_hcr_dir_from_unit() {
 
 		if [[ -f "${fragment}" ]]; then
 
-			# ------------------------------------------------
-			# Si la unidad se encuentra dentro del directorio
-			# HCR y contiene el binario, utilizar ese directorio.
-			# ------------------------------------------------
-
 			candidate="$(dirname -- "${fragment}")"
 
 			if [[ -f "${candidate}/hcr-server" ]]; then
@@ -512,10 +540,6 @@ detect_hcr_dir_from_unit() {
 				return 0
 
 			fi
-
-			# ------------------------------------------------
-			# Si el servicio utiliza WorkingDirectory, utilizarlo.
-			# ------------------------------------------------
 
 			working_directory="$(
 				systemctl show \
@@ -537,10 +561,6 @@ detect_hcr_dir_from_unit() {
 		fi
 	fi
 
-	# --------------------------------------------------------
-	# Obtener ExecStart.
-	# --------------------------------------------------------
-
 	exec_start="$(
 		systemctl show \
 			--property=ExecStart \
@@ -549,10 +569,6 @@ detect_hcr_dir_from_unit() {
 			2>/dev/null ||
 			true
 	)"
-
-	# --------------------------------------------------------
-	# Buscar una ruta que termine en /hcr-server.
-	# --------------------------------------------------------
 
 	if [[ "${exec_start}" =~ (/[^[:space:]]*/hcr-server) ]]; then
 
@@ -578,17 +594,6 @@ detect_hcr_dir_from_unit() {
 # ============================================================
 # DETECTAR INSTALACIÓN HCR
 # ============================================================
-#
-# ORDEN:
-#
-# 1. Busca cualquier unidad HCR existente.
-# 2. Obtiene su instalación real.
-# 3. Si no existe ninguna instancia, busca instalaciones
-#    conocidas que contengan un binario HCR válido.
-#
-# NO supone que existan puertos concretos.
-#
-# ============================================================
 
 detect_hcr_installation() {
 
@@ -596,10 +601,6 @@ detect_hcr_installation() {
 	local detected_dir=""
 	local candidate=""
 	local candidates=()
-
-	# --------------------------------------------------------
-	# Primero: unidades HCR existentes.
-	# --------------------------------------------------------
 
 	while IFS= read -r unit; do
 
@@ -623,13 +624,6 @@ detect_hcr_installation() {
 
 	done < <(get_existing_hcr_units)
 
-	# --------------------------------------------------------
-	# Segundo: rutas conocidas.
-	#
-	# Esto NO significa que supongamos que existen instancias.
-	# Solo son ubicaciones posibles de una instalación HCR.
-	# --------------------------------------------------------
-
 	if [[ -z "${HCR_DIR}" ]]; then
 
 		candidates=(
@@ -651,10 +645,6 @@ detect_hcr_installation() {
 
 		done
 	fi
-
-	# --------------------------------------------------------
-	# Si no se encontró ninguna instalación.
-	# --------------------------------------------------------
 
 	if [[ -z "${HCR_DIR}" ]]; then
 
@@ -1159,10 +1149,6 @@ validate_conflicts() {
 
 	section "Comprobando conflictos"
 
-	# --------------------------------------------------------
-	# Puerto
-	# --------------------------------------------------------
-
 	if ! check_port_available "${PORT}"; then
 
 		error_message \
@@ -1183,10 +1169,6 @@ validate_conflicts() {
 	success \
 		"El puerto ${PORT} está disponible."
 
-	# --------------------------------------------------------
-	# Unidad fuente
-	# --------------------------------------------------------
-
 	if [[ -e "${UNIT_SOURCE}" || -L "${UNIT_SOURCE}" ]]; then
 
 		fail \
@@ -1199,10 +1181,6 @@ ${UNIT_SOURCE}"
 	success \
 		"No existe una unidad fuente para el puerto ${PORT}."
 
-	# --------------------------------------------------------
-	# Enlace
-	# --------------------------------------------------------
-
 	if [[ -e "${UNIT_LINK}" || -L "${UNIT_LINK}" ]]; then
 
 		fail \
@@ -1214,10 +1192,6 @@ ${UNIT_LINK}"
 
 	success \
 		"No existe un enlace systemd para el puerto ${PORT}."
-
-	# --------------------------------------------------------
-	# Unidad cargada por systemd
-	# --------------------------------------------------------
 
 	loaded_fragment="$(
 		systemctl show \
@@ -1254,20 +1228,12 @@ render_unit() {
 	local tls_arguments=""
 	local capability_arguments=""
 
-	# --------------------------------------------------------
-	# TLS
-	# --------------------------------------------------------
-
 	if [[ "${TRANSPORT}" == "tls" ||
 		  "${TRANSPORT}" == "auto" ]]; then
 
 		tls_arguments=" --tls-cert ${TLS_CERT_PATH} --tls-key ${TLS_KEY_PATH}"
 
 	fi
-
-	# --------------------------------------------------------
-	# CAPABILITIES
-	# --------------------------------------------------------
 
 	if requires_privileged_port_capability "${PORT}"; then
 
@@ -1289,20 +1255,12 @@ EOF
 
 	fi
 
-	# --------------------------------------------------------
-	# TEMPORAL
-	# --------------------------------------------------------
-
 	TEMP_UNIT="$(
 		mktemp \
 			"${HCR_DIR}/.${SERVICE_NAME_SELECTED}.XXXXXX.service"
 	)"
 
 	chmod 0600 "${TEMP_UNIT}"
-
-	# --------------------------------------------------------
-	# UNIDAD SYSTEMD
-	# --------------------------------------------------------
 
 	cat >"${TEMP_UNIT}" <<EOF
 [Unit]
@@ -1384,10 +1342,6 @@ EOF
 
 	chmod 0644 "${TEMP_UNIT}"
 
-	# --------------------------------------------------------
-	# Validación systemd antes de instalar.
-	# --------------------------------------------------------
-
 	systemd-analyze verify "${TEMP_UNIT}"
 }
 
@@ -1418,10 +1372,6 @@ install_unit() {
 
 	fi
 
-	# --------------------------------------------------------
-	# Mover unidad fuente
-	# --------------------------------------------------------
-
 	spinner_start \
 		"Instalando unidad HCR Server..."
 
@@ -1444,10 +1394,6 @@ install_unit() {
 			"No se pudo instalar la unidad HCR Server."
 
 	fi
-
-	# --------------------------------------------------------
-	# Enlace systemd
-	# --------------------------------------------------------
 
 	spinner_start \
 		"Creando enlace de systemd..."
@@ -1502,10 +1448,6 @@ configure_systemd() {
 
 	fi
 
-	# --------------------------------------------------------
-	# Enable
-	# --------------------------------------------------------
-
 	spinner_start \
 		"Habilitando inicio automático..."
 
@@ -1525,10 +1467,6 @@ configure_systemd() {
 			"No se pudo habilitar el servicio."
 
 	fi
-
-	# --------------------------------------------------------
-	# Reset failed
-	# --------------------------------------------------------
 
 	systemctl reset-failed \
 		"${SERVICE_NAME_SELECTED}.service" >/dev/null 2>&1 ||
@@ -1720,10 +1658,6 @@ verify_installation() {
 
 	section "Verificación final"
 
-	# --------------------------------------------------------
-	# Servicio
-	# --------------------------------------------------------
-
 	if systemctl is-active --quiet \
 		"${SERVICE_NAME_SELECTED}.service"; then
 
@@ -1738,10 +1672,6 @@ verify_installation() {
 		return 1
 
 	fi
-
-	# --------------------------------------------------------
-	# Enable
-	# --------------------------------------------------------
 
 	if systemctl is-enabled --quiet \
 		"${SERVICE_NAME_SELECTED}.service"; then
@@ -1758,10 +1688,6 @@ verify_installation() {
 
 	fi
 
-	# --------------------------------------------------------
-	# Unidad fuente
-	# --------------------------------------------------------
-
 	if [[ -f "${UNIT_SOURCE}" &&
 		  ! -L "${UNIT_SOURCE}" ]]; then
 
@@ -1776,10 +1702,6 @@ verify_installation() {
 		return 1
 
 	fi
-
-	# --------------------------------------------------------
-	# Enlace
-	# --------------------------------------------------------
 
 	if [[ -L "${UNIT_LINK}" ]]; then
 
@@ -1806,10 +1728,6 @@ verify_installation() {
 
 	fi
 
-	# --------------------------------------------------------
-	# WorkingDirectory
-	# --------------------------------------------------------
-
 	if [[ "$(
 		systemctl show \
 			--property=WorkingDirectory \
@@ -1828,10 +1746,6 @@ verify_installation() {
 		return 1
 
 	fi
-
-	# --------------------------------------------------------
-	# ExecStart
-	# --------------------------------------------------------
 
 	exec_start="$(
 		systemctl show \
@@ -1863,10 +1777,6 @@ verify_installation() {
 		return 1
 
 	fi
-
-	# --------------------------------------------------------
-	# Listener
-	# --------------------------------------------------------
 
 	if check_hcr_listener "${PORT}"; then
 
@@ -2053,10 +1963,6 @@ main() {
 
 	header
 
-	# --------------------------------------------------------
-	# ENTORNO
-	# --------------------------------------------------------
-
 	section "Verificando entorno"
 
 	spinner_start \
@@ -2081,10 +1987,6 @@ main() {
 
 	fi
 
-	# --------------------------------------------------------
-	# BLOQUEO
-	# --------------------------------------------------------
-
 	spinner_start \
 		"Adquiriendo bloqueo de HCR Server..."
 
@@ -2104,33 +2006,13 @@ main() {
 
 	fi
 
-	# --------------------------------------------------------
-	# INSTALACIÓN EXISTENTE
-	# --------------------------------------------------------
-
 	validate_existing_installation
-
-	# --------------------------------------------------------
-	# PUERTO
-	# --------------------------------------------------------
 
 	configure_port
 
-	# --------------------------------------------------------
-	# DESTINO
-	# --------------------------------------------------------
-
 	configure_target_port
 
-	# --------------------------------------------------------
-	# CONFLICTOS
-	# --------------------------------------------------------
-
 	validate_conflicts
-
-	# --------------------------------------------------------
-	# RESUMEN PREVIO
-	# --------------------------------------------------------
 
 	section "Resumen de instalación"
 
@@ -2188,27 +2070,11 @@ main() {
 
 	esac
 
-	# --------------------------------------------------------
-	# INSTALAR
-	# --------------------------------------------------------
-
 	install_unit
-
-	# --------------------------------------------------------
-	# SYSTEMD
-	# --------------------------------------------------------
 
 	configure_systemd
 
-	# --------------------------------------------------------
-	# INICIAR
-	# --------------------------------------------------------
-
 	start_service
-
-	# --------------------------------------------------------
-	# SALUD
-	# --------------------------------------------------------
 
 	spinner_start \
 		"Realizando comprobación de estabilidad..."
@@ -2238,10 +2104,6 @@ main() {
 
 	fi
 
-	# --------------------------------------------------------
-	# VERIFICACIÓN FINAL
-	# --------------------------------------------------------
-
 	if ! verify_installation; then
 
 		printf '\n'
@@ -2255,10 +2117,6 @@ main() {
 			"La nueva instancia no quedó instalada correctamente."
 
 	fi
-
-	# --------------------------------------------------------
-	# RESUMEN
-	# --------------------------------------------------------
 
 	show_summary
 }
