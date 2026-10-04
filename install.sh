@@ -236,6 +236,45 @@ check_port_available() {
 	return 1
 }
 
+# ------------------------------------------------------------
+# VERIFICAR ESCUCHA HCR
+# ------------------------------------------------------------
+
+check_hcr_listener() {
+	local port="$1"
+	local listeners
+
+	listeners="$(
+		ss -lntH "sport = :${port}" 2>/dev/null || true
+	)"
+
+	[ -n "${listeners}" ] || return 1
+
+	return 0
+}
+
+# ------------------------------------------------------------
+# CONFIGURAR CAPACIDAD DE PUERTO PRIVILEGIADO
+# ------------------------------------------------------------
+
+requires_privileged_port_capability() {
+	local port="$1"
+
+	(( port >= 1 && port <= 1023 ))
+}
+
+configure_port_capability() {
+	local port="$1"
+
+	if requires_privileged_port_capability "${port}"; then
+		info "Puerto HCR privilegiado detectado: ${port}"
+		detail "Se habilitará CAP_NET_BIND_SERVICE exclusivamente para HCR Server."
+	else
+		detail "Puerto HCR no privilegiado: ${port}"
+		detail "No se requiere CAP_NET_BIND_SERVICE."
+	fi
+}
+
 configure_ports() {
 	local input
 
@@ -264,6 +303,8 @@ configure_ports() {
 	done
 
 	success "Puerto HCR configurado: ${PORT}"
+
+	configure_port_capability "${PORT}"
 
 	while true; do
 		printf "${WHITE}Puerto destino para redirección${RESET} ${DIM}[${TARGET_PORT}]${RESET}: "
@@ -538,11 +579,40 @@ validate_bundle() {
 
 render_unit() {
 	local tls_arguments=""
+	local capability_arguments=""
 
 	if [ "${TRANSPORT}" = "tls" ] ||
 		[ "${TRANSPORT}" = "auto" ]; then
 
 		tls_arguments=" --tls-cert ${TLS_CERT_PATH} --tls-key ${TLS_KEY_PATH}"
+	fi
+
+	# --------------------------------------------------------
+	# PUERTOS PRIVILEGIADOS
+	#
+	# Los puertos 1-1023 requieren CAP_NET_BIND_SERVICE.
+	#
+	# Se concede únicamente esa capacidad cuando es necesaria.
+	# --------------------------------------------------------
+
+	if requires_privileged_port_capability "${PORT}"; then
+
+		capability_arguments=$(
+			cat <<'EOF'
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+EOF
+		)
+
+	else
+
+		capability_arguments=$(
+			cat <<'EOF'
+CapabilityBoundingSet=
+AmbientCapabilities=
+EOF
+		)
+
 	fi
 
 	TEMP_UNIT="$(
@@ -585,8 +655,8 @@ UMask=0077
 # ------------------------------------------------------------
 
 NoNewPrivileges=true
-CapabilityBoundingSet=
-AmbientCapabilities=
+
+${capability_arguments}
 
 PrivateTmp=true
 PrivateDevices=true
@@ -657,6 +727,7 @@ cleanup() {
 
 verify_service_health() {
 	local initial_pid
+	local final_pid
 
 	initial_pid="$(
 		systemctl show \
@@ -671,15 +742,51 @@ verify_service_health() {
 	sleep 3
 
 	systemctl is-active --quiet "${SERVICE_NAME}.service" ||
-		fail "El servicio no permaneció activo."
+		fail "El servicio no permaneció activo durante la comprobación."
 
-	[ "$(
+	final_pid="$(
 		systemctl show \
 			--property=MainPID \
 			--value \
 			"${SERVICE_NAME}.service"
-	)" = "${initial_pid}" ] ||
+	)"
+
+	[[ "${final_pid}" =~ ^[1-9][0-9]*$ ]] ||
+		fail "El servicio dejó de reportar un proceso activo."
+
+	[ "${final_pid}" = "${initial_pid}" ] ||
 		fail "El servicio se reinició durante la comprobación."
+
+	# --------------------------------------------------------
+	# VERIFICAR ESCUCHA REAL
+	# --------------------------------------------------------
+
+	if ! check_hcr_listener "${PORT}"; then
+
+		printf "\n" >&2
+
+		error_message \
+			"HCR Server está activo, pero no está escuchando en el puerto ${PORT}."
+
+		printf "\n" >&2
+
+		systemctl status \
+			--no-pager \
+			--full \
+			"${SERVICE_NAME}.service" >&2 || true
+
+		printf "\n" >&2
+
+		journalctl \
+			-u "${SERVICE_NAME}.service" \
+			-n 20 \
+			--no-pager \
+			--output=short-iso >&2 || true
+
+		return 1
+	fi
+
+	return 0
 }
 
 # ------------------------------------------------------------
@@ -772,6 +879,13 @@ install_service() {
 			--full \
 			"${SERVICE_NAME}.service" || true
 
+		printf "\n"
+
+		journalctl \
+			-u "${SERVICE_NAME}.service" \
+			-n 20 \
+			--no-pager || true
+
 		fail "HCR Server no pudo iniciarse."
 	fi
 
@@ -794,13 +908,58 @@ install_service() {
 		fail "systemd reportó un directorio de trabajo inesperado."
 	fi
 
+	# --------------------------------------------------------
+	# COMPROBACIÓN DE ESTABILIDAD
+	# --------------------------------------------------------
+
 	spinner_start "Realizando comprobación de estabilidad..."
 
 	if verify_service_health >/dev/null 2>&1; then
+
 		spinner_stop ok
+
 	else
+
 		spinner_stop fail
-		fail "La comprobación de estabilidad falló."
+
+		printf "\n"
+		error_message "La comprobación de estabilidad falló."
+
+		printf "\n"
+
+		detail "Estado del servicio:"
+		systemctl status \
+			--no-pager \
+			--full \
+			"${SERVICE_NAME}.service" || true
+
+		printf "\n"
+
+		detail "Últimos registros de HCR Server:"
+		journalctl \
+			-u "${SERVICE_NAME}.service" \
+			-n 30 \
+			--no-pager || true
+
+		printf "\n"
+
+		fail "La instalación terminó con errores."
+	fi
+
+	# --------------------------------------------------------
+	# VERIFICACIÓN FINAL DEL PUERTO
+	# --------------------------------------------------------
+
+	if check_hcr_listener "${PORT}"; then
+
+		success \
+			"HCR Server está escuchando correctamente en el puerto ${PORT}"
+
+	else
+
+		fail \
+			"HCR Server está activo, pero no se detectó escucha en el puerto ${PORT}."
+
 	fi
 }
 
@@ -842,6 +1001,16 @@ show_summary() {
 	printf "  ${CYAN}${ICON_ARROW}${RESET} Tasks máximas  : ${BRIGHT_WHITE}1024${RESET}\n"
 
 	printf "  ${CYAN}${ICON_ARROW}${RESET} Memoria máxima : ${BRIGHT_WHITE}512 MB${RESET}\n"
+
+	if requires_privileged_port_capability "${PORT}"; then
+
+		printf "  ${CYAN}${ICON_ARROW}${RESET} Capacidad puerto: ${BRIGHT_WHITE}CAP_NET_BIND_SERVICE${RESET}\n"
+
+	else
+
+		printf "  ${CYAN}${ICON_ARROW}${RESET} Capacidad puerto: ${BRIGHT_WHITE}No requerida${RESET}\n"
+
+	fi
 
 	printf "\n"
 
@@ -902,3 +1071,54 @@ trap cleanup EXIT
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	main "$@"
 fi
+
+Qué cambia específicamente al elegir "80"
+
+Ahora la unidad generada será conceptualmente:
+
+User=root
+Group=root
+
+NoNewPrivileges=true
+
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+Eso permite que:
+
+hcr-server → :80
+
+pueda hacer el "bind()" correctamente, sin quitar las demás restricciones de seguridad.
+
+Y si eliges, por ejemplo, "8080", volverá a generar:
+
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+porque para "8080" no necesita esa capacidad.
+
+Un detalle importante de tu prueba anterior
+
+Tu "ss" mostraba:
+
+*:8080  users:(("bilola-server"...))
+
+Eso significa que 8080 está ocupado por Bilola, mientras que el "80" aparentemente estaba libre. Por eso "80" es una elección razonable para HCR si realmente quieres usarlo.
+
+Después de instalar con "80", la comprobación correcta debería terminar mostrando algo equivalente a:
+
+✔ HCR Server está activo
+✔ Directorio de trabajo verificado
+✔ Realizando comprobación de estabilidad...
+✔ Completado
+✔ HCR Server está escuchando correctamente en el puerto 80
+
+Y puedes comprobarlo manualmente con:
+
+systemctl status hcr-server --no-pager -l
+
+y:
+
+ss -lntp | grep ':80'
+
+Deberías ver "hcr-server" escuchando en "*:80".
