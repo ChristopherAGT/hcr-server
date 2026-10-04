@@ -3,25 +3,36 @@ set -euo pipefail
 
 # ============================================================
 # HCR SERVER — DESINSTALADOR
-# Compatible con el instalador HCR Server actual
+# ============================================================
+#
+# Compatible con el instalador HCR Server actual.
 #
 # Elimina:
-#   - Todas las instancias hcr-server-*.service
-#   - Enlaces/unidades systemd correspondientes
+#   - Todas las instancias hcr-server-<PUERTO>.service
+#   - Unidades/enlaces systemd correspondientes
 #   - Drop-ins de systemd
 #   - Binario hcr-server
 #   - fullchain.pem
 #   - privkey.pem
-#   - Archivos temporales de systemd
+#   - Archivos temporales de HCR
 #   - Este propio desinstalador
 #
 # NO elimina el directorio completo del panel.
 # ============================================================
 
+set -euo pipefail
+
+# ============================================================
+# ENTORNO
+# ============================================================
+
 PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 LC_ALL="C"
 LANG="C"
-export PATH LC_ALL LANG
+
+export PATH
+export LC_ALL
+export LANG
 
 # ============================================================
 # CONFIGURACIÓN
@@ -31,16 +42,15 @@ SERVICE_PREFIX="hcr-server"
 SYSTEMD_DIR="/etc/systemd/system"
 
 # ============================================================
-# RUTAS DEL DESINSTALADOR
+# RUTA DEL DESINSTALADOR
 # ============================================================
 
 command -v readlink >/dev/null 2>&1 || {
-	printf '%s\n' "Error: readlink no está instalado." >&2
-	exit 1
+    printf '%s\n' "Error: readlink no está instalado." >&2
+    exit 1
 }
 
 SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
-SCRIPT_DIR="$(dirname -- "${SCRIPT_PATH}")"
 
 # ============================================================
 # VARIABLES DE INSTALACIÓN
@@ -51,13 +61,12 @@ BINARY_PATH=""
 TLS_CERT_PATH=""
 TLS_KEY_PATH=""
 
-# Lista de servicios encontrados.
+# ============================================================
+# ARRAYS
+# ============================================================
+
 SERVICES=()
-
-# Lista de unidades fuente.
 UNIT_SOURCES=()
-
-# Lista de enlaces systemd.
 UNIT_LINKS=()
 
 # ============================================================
@@ -71,9 +80,7 @@ DIM="\033[2m"
 RED="\033[31m"
 GREEN="\033[32m"
 YELLOW="\033[33m"
-BLUE="\033[34m"
 CYAN="\033[36m"
-WHITE="\033[37m"
 
 BRIGHT_BLUE="\033[94m"
 BRIGHT_CYAN="\033[96m"
@@ -92,55 +99,62 @@ WARN="!"
 DIAMOND="◆"
 
 # ============================================================
-# SPINNER
+# CONTROL
 # ============================================================
 
 SPINNER_PID=""
+LOCK_FD_OPEN="false"
+
+# ============================================================
+# SPINNER
+# ============================================================
 
 spinner_start() {
-	local message="$1"
 
-	(
-		local frames=(
-			"⠋"
-			"⠙"
-			"⠹"
-			"⠸"
-			"⠼"
-			"⠴"
-			"⠦"
-			"⠧"
-			"⠇"
-			"⠏"
-		)
+    local message="$1"
 
-		local i=0
+    (
+        local frames=(
+            "⠋"
+            "⠙"
+            "⠹"
+            "⠸"
+            "⠼"
+            "⠴"
+            "⠦"
+            "⠧"
+            "⠇"
+            "⠏"
+        )
 
-		while true; do
-			printf '\r%b' \
-				"${BRIGHT_CYAN}${frames[$i]}${RESET} ${message}"
+        local i=0
 
-			i=$(( (i + 1) % ${#frames[@]} ))
+        while true; do
 
-			sleep 0.08
-		done
-	) &
+            printf '\r%b' \
+                "${BRIGHT_CYAN}${frames[$i]}${RESET} ${message}"
 
-	SPINNER_PID=$!
+            i=$(( (i + 1) % ${#frames[@]} ))
+
+            sleep 0.08
+        done
+    ) &
+
+    SPINNER_PID=$!
 }
 
 spinner_stop() {
 
-	if [[ -n "${SPINNER_PID}" ]]; then
+    if [[ -n "${SPINNER_PID}" ]]; then
 
-		kill "${SPINNER_PID}" >/dev/null 2>&1 || true
+        kill "${SPINNER_PID}" >/dev/null 2>&1 || true
 
-		wait "${SPINNER_PID}" 2>/dev/null || true
+        wait "${SPINNER_PID}" 2>/dev/null || true
 
-		SPINNER_PID=""
+        SPINNER_PID=""
 
-		printf '\r\033[K'
-	fi
+        printf '\r\033[K'
+    fi
 }
 
 # ============================================================
@@ -148,166 +162,174 @@ spinner_stop() {
 # ============================================================
 
 clear_screen() {
-	clear 2>/dev/null || true
+
+    if command -v clear >/dev/null 2>&1; then
+        clear 2>/dev/null || true
+    fi
 }
 
 line() {
-	printf '%b\n' \
-		"${DIM}────────────────────────────────────────────────────────────${RESET}"
+
+    printf '%b\n' \
+        "${DIM}────────────────────────────────────────────────────────────${RESET}"
 }
 
 header() {
 
-	clear_screen
+    clear_screen
 
-	printf '\n'
+    printf '\n'
 
-	printf '%b\n' \
-		"${BRIGHT_CYAN}${BOLD}╔════════════════════════════════════════════════════════════╗${RESET}"
+    printf '%b\n' \
+        "${BRIGHT_CYAN}${BOLD}╔════════════════════════════════════════════════════════════╗${RESET}"
 
-	printf '%b\n' \
-		"${BRIGHT_CYAN}${BOLD}║              HCR SERVER — DESINSTALADOR                  ║${RESET}"
+    printf '%b\n' \
+        "${BRIGHT_CYAN}${BOLD}║              HCR SERVER — DESINSTALADOR                  ║${RESET}"
 
-	printf '%b\n' \
-		"${BRIGHT_CYAN}${BOLD}║                  DESINSTALACIÓN COMPLETA                 ║${RESET}"
+    printf '%b\n' \
+        "${BRIGHT_CYAN}${BOLD}║                  DESINSTALACIÓN COMPLETA                 ║${RESET}"
 
-	printf '%b\n' \
-		"${BRIGHT_CYAN}${BOLD}╚════════════════════════════════════════════════════════════╝${RESET}"
+    printf '%b\n' \
+        "${BRIGHT_CYAN}${BOLD}╚════════════════════════════════════════════════════════════╝${RESET}"
 
-	printf '\n'
+    printf '\n'
 }
 
 section() {
 
-	printf '\n%b\n' \
-		"${BRIGHT_BLUE}${BOLD}${DIAMOND} $1${RESET}"
+    printf '\n%b\n' \
+        "${BRIGHT_BLUE}${BOLD}${DIAMOND} $1${RESET}"
 
-	line
+    line
 }
 
 success() {
-	printf '%b\n' \
-		"${GREEN}${OK}${RESET} $1"
+
+    printf '%b\n' \
+        "${GREEN}${OK}${RESET} $1"
 }
 
 info() {
-	printf '%b\n' \
-		"${CYAN}${ARROW}${RESET} $1"
+
+    printf '%b\n' \
+        "${CYAN}${ARROW}${RESET} $1"
 }
 
 warning() {
-	printf '%b\n' \
-		"${YELLOW}${WARN}${RESET} $1"
+
+    printf '%b\n' \
+        "${YELLOW}${WARN}${RESET} $1"
 }
 
 error_message() {
-	printf '%b\n' \
-		"${RED}${FAIL}${RESET} $1" >&2
+
+    printf '%b\n' \
+        "${RED}${FAIL}${RESET} $1" >&2
 }
 
 detail() {
-	printf '%b\n' \
-		"  ${DIM}${BULLET}${RESET} $1"
+
+    printf '%b\n' \
+        "  ${DIM}${BULLET}${RESET} $1"
 }
 
 # ============================================================
-# ERROR
+# ERROR FATAL
 # ============================================================
 
 fail() {
 
-	spinner_stop
+    spinner_stop
 
-	printf '\n'
+    printf '\n'
 
-	error_message "$1"
+    error_message "$1"
 
-	exit 1
+    exit 1
 }
 
 # ============================================================
-# COMPROBACIÓN DE COMANDOS
+# COMPROBAR COMANDO
 # ============================================================
 
 require_command() {
 
-	local command_name="$1"
+    local command_name="$1"
 
-	command -v "${command_name}" >/dev/null 2>&1 ||
-		fail \
-			"No se encontró el comando requerido: ${command_name}"
+    command -v "${command_name}" >/dev/null 2>&1 ||
+        fail "No se encontró el comando requerido: ${command_name}"
 }
 
 # ============================================================
-# ENTORNO
+# COMPROBAR ENTORNO
 # ============================================================
 
 require_environment() {
 
-	if [[ "${EUID}" -ne 0 ]]; then
-		fail "Este desinstalador debe ejecutarse como root."
-	fi
+    if [[ "${EUID}" -ne 0 ]]; then
+        fail "Este desinstalador debe ejecutarse como root."
+    fi
 
-	if [[ "$(uname -s)" != "Linux" ]]; then
-		fail "Este desinstalador solamente funciona en Linux."
-	fi
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        fail "Este desinstalador solamente funciona en Linux."
+    fi
 
-	for command_name in \
-		systemctl \
-		systemd-analyze \
-		flock \
-		readlink \
-		stat \
-		rm \
-		sleep \
-		grep \
-		sed \
-		awk \
-		tail \
-		head \
-		find \
-		sort \
-		basename \
-		dirname
-	do
-		require_command "${command_name}"
-	done
+    local command_name
 
-	if [[ ! -d "${SYSTEMD_DIR}" ]]; then
-		fail "No existe el directorio de systemd: ${SYSTEMD_DIR}"
-	fi
+    for command_name in \
+        systemctl \
+        flock \
+        readlink \
+        rm \
+        sleep \
+        grep \
+        sed \
+        awk \
+        tail \
+        find \
+        sort \
+        basename \
+        dirname
+    do
+        require_command "${command_name}"
+    done
+
+    if [[ ! -d "${SYSTEMD_DIR}" ]]; then
+        fail "No existe el directorio de systemd: ${SYSTEMD_DIR}"
+    fi
 }
 
 # ============================================================
 # BLOQUEO
 # ============================================================
 
-LOCK_FD_OPEN="false"
-
 acquire_uninstall_lock() {
 
-	local lock_file="${SYSTEMD_DIR}/.${SERVICE_PREFIX}.uninstall.lock"
+    local lock_file
 
-	exec 9>"${lock_file}"
+    lock_file="${SYSTEMD_DIR}/.${SERVICE_PREFIX}.uninstall.lock"
 
-	if ! flock -n 9; then
-		fail \
-			"Ya existe otra operación de instalación/desinstalación de HCR Server en curso."
-	fi
+    exec 9>"${lock_file}"
 
-	LOCK_FD_OPEN="true"
+    if ! flock -n 9; then
+
+        fail \
+            "Ya existe otra operación de instalación/desinstalación de HCR Server en curso."
+    fi
+
+    LOCK_FD_OPEN="true"
 }
 
 release_uninstall_lock() {
 
-	if [[ "${LOCK_FD_OPEN}" == "true" ]]; then
+    if [[ "${LOCK_FD_OPEN}" == "true" ]]; then
 
-		flock -u 9 >/dev/null 2>&1 || true
+        flock -u 9 >/dev/null 2>&1 || true
 
-		exec 9>&-
+        exec 9>&-
 
-		LOCK_FD_OPEN="false"
-	fi
+        LOCK_FD_OPEN="false"
+    fi
 }
 
 # ============================================================
@@ -316,181 +338,226 @@ release_uninstall_lock() {
 
 normalize_path() {
 
-	local path="$1"
+    local path="$1"
 
-	if [[ -e "${path}" || -L "${path}" ]]; then
-		readlink -f -- "${path}"
-	else
-		printf '%s' "${path}"
-	fi
+    if [[ -e "${path}" || -L "${path}" ]]; then
+
+        readlink -f -- "${path}"
+
+    else
+
+        printf '%s' "${path}"
+
+    fi
 }
 
 # ============================================================
-# DETECTAR INSTALACIÓN DESDE UNA UNIDAD
+# OBTENER WORKINGDIRECTORY
 # ============================================================
 
 extract_working_directory() {
 
-	local unit="$1"
-	local working_directory
+    local unit="$1"
+    local working_directory=""
 
-	working_directory="$(
-		grep -E '^WorkingDirectory=' \
-			"${unit}" \
-			2>/dev/null |
-			tail -n1 |
-			sed 's/^WorkingDirectory=//' ||
-			true
-	)"
+    if [[ -f "${unit}" ]]; then
 
-	printf '%s' "${working_directory}"
+        working_directory="$(
+            sed -n \
+                's/^[[:space:]]*WorkingDirectory=//p' \
+                "${unit}" \
+                2>/dev/null |
+                tail -n1
+        )"
+
+    fi
+
+    printf '%s' "${working_directory}"
 }
 
 # ============================================================
-# DETECTAR TODOS LOS SERVICIOS
+# COMPROBAR SI SERVICIO YA EXISTE EN ARRAY
+# ============================================================
+
+service_exists() {
+
+    local wanted="$1"
+    local existing
+
+    for existing in "${SERVICES[@]}"; do
+
+        if [[ "${existing}" == "${wanted}" ]]; then
+            return 0
+        fi
+
+    done
+
+    return 1
+}
+
+# ============================================================
+# AGREGAR SERVICIO
+# ============================================================
+
+add_service() {
+
+    local service_name="$1"
+    local link="$2"
+    local source="$3"
+
+    if ! service_exists "${service_name}"; then
+
+        SERVICES+=("${service_name}")
+        UNIT_LINKS+=("${link}")
+        UNIT_SOURCES+=("${source}")
+
+    fi
+}
+
+# ============================================================
+# DETECTAR SERVICIOS
 # ============================================================
 
 discover_services() {
 
-	local file
-	local service_name
-	local found=0
+    local file
+    local service_name
+    local fragment
 
-	SERVICES=()
-	UNIT_SOURCES=()
-	UNIT_LINKS=()
+    SERVICES=()
+    UNIT_SOURCES=()
+    UNIT_LINKS=()
 
-	# --------------------------------------------------------
-	# Buscar unidades directamente en /etc/systemd/system
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Buscar archivos y enlaces directamente en systemd.
+    # --------------------------------------------------------
 
-	while IFS= read -r -d '' file; do
+    while IFS= read -r -d '' file; do
 
-		service_name="$(basename -- "${file}")"
+        service_name="$(basename -- "${file}")"
 
-		if [[ "${service_name}" =~ ^${SERVICE_PREFIX}-[0-9]+\.service$ ]]; then
+        if [[ "${service_name}" =~ ^${SERVICE_PREFIX}-[0-9]+\.service$ ]]; then
 
-			SERVICES+=("${service_name}")
-			UNIT_LINKS+=("${file}")
+            if [[ -L "${file}" ]]; then
 
-			found=1
+                fragment="$(
+                    readlink -f -- "${file}" 2>/dev/null ||
+                    true
+                )"
 
-			# Resolver enlace si corresponde.
-			if [[ -L "${file}" ]]; then
-				UNIT_SOURCES+=("$(normalize_path "${file}")")
-			else
-				UNIT_SOURCES+=("${file}")
-			fi
-		fi
+                if [[ -z "${fragment}" ]]; then
+                    fragment="${file}"
+                fi
 
-	done < <(
-		find "${SYSTEMD_DIR}" \
-			-maxdepth 1 \
-			-type f \
-			-name "${SERVICE_PREFIX}-*.service" \
-			-print0 \
-			2>/dev/null
-	)
+            else
 
-	while IFS= read -r -d '' file; do
+                fragment="${file}"
 
-		service_name="$(basename -- "${file}")"
+            fi
 
-		if [[ "${service_name}" =~ ^${SERVICE_PREFIX}-[0-9]+\.service$ ]]; then
+            add_service \
+                "${service_name}" \
+                "${file}" \
+                "${fragment}"
+        fi
 
-			# Evitar duplicados.
-			if [[ ! " ${SERVICES[*]} " =~ " ${service_name} " ]]; then
+    done < <(
+        find "${SYSTEMD_DIR}" \
+            -maxdepth 1 \
+            \( -type f -o -type l \) \
+            -name "${SERVICE_PREFIX}-*.service" \
+            -print0 \
+            2>/dev/null
+    )
 
-				SERVICES+=("${service_name}")
-				UNIT_LINKS+=("${file}")
-				UNIT_SOURCES+=("$(normalize_path "${file}")")
+    # --------------------------------------------------------
+    # Buscar unidades conocidas por systemd.
+    # --------------------------------------------------------
 
-				found=1
-			fi
-		fi
+    while IFS= read -r service_name; do
 
-	done < <(
-		find "${SYSTEMD_DIR}" \
-			-maxdepth 1 \
-			-type l \
-			-name "${SERVICE_PREFIX}-*.service" \
-			-print0 \
-			2>/dev/null
-	)
+        [[ -n "${service_name}" ]] || continue
 
-	# --------------------------------------------------------
-	# Buscar servicios conocidos por systemd.
-	# --------------------------------------------------------
+        if [[ "${service_name}" =~ ^${SERVICE_PREFIX}-[0-9]+\.service$ ]]; then
 
-	while IFS= read -r service_name; do
+            if ! service_exists "${service_name}"; then
 
-		[[ -n "${service_name}" ]] || continue
+                fragment="$(
+                    systemctl show \
+                        --property=FragmentPath \
+                        --value \
+                        "${service_name}" \
+                        2>/dev/null ||
+                        true
+                )"
 
-		if [[ "${service_name}" =~ ^${SERVICE_PREFIX}-[0-9]+\.service$ ]]; then
+                if [[ -n "${fragment}" &&
+                      "${fragment}" != "n/a" &&
+                      -f "${fragment}" ]]; then
 
-			local duplicate="false"
+                    add_service \
+                        "${service_name}" \
+                        "${SYSTEMD_DIR}/${service_name}" \
+                        "${fragment}"
 
-			for existing in "${SERVICES[@]}"; do
+                fi
+            fi
+        fi
 
-				if [[ "${existing}" == "${service_name}" ]]; then
-					duplicate="true"
-					break
-				fi
+    done < <(
+        systemctl list-unit-files \
+            --type=service \
+            --no-legend \
+            --no-pager \
+            2>/dev/null |
+            awk '{print $1}'
+    )
 
-			done
+    # --------------------------------------------------------
+    # Ordenar conservando correctamente las correspondencias.
+    # --------------------------------------------------------
 
-			if [[ "${duplicate}" == "false" ]]; then
+    if [[ "${#SERVICES[@]}" -gt 1 ]]; then
 
-				local fragment
+        local -a sorted_services=()
+        local service
+        local i
 
-				fragment="$(
-					systemctl show \
-						--property=FragmentPath \
-						--value \
-						"${service_name}" \
-						2>/dev/null ||
-						true
-				)"
+        while IFS= read -r service; do
 
-				if [[ -n "${fragment}" ]]; then
+            [[ -n "${service}" ]] || continue
 
-					SERVICES+=("${service_name}")
-					UNIT_LINKS+=("${SYSTEMD_DIR}/${service_name}")
-					UNIT_SOURCES+=("${fragment}")
+            sorted_services+=("${service}")
 
-					found=1
-				fi
-			fi
-		fi
+        done < <(
+            printf '%s\n' "${SERVICES[@]}" |
+                sort -V
+        )
 
-	done < <(
-		systemctl list-unit-files \
-			--type=service \
-			--no-legend \
-			--no-pager \
-			2>/dev/null |
-			awk '{print $1}'
-	)
+        local -a sorted_sources=()
+        local -a sorted_links=()
 
-	# --------------------------------------------------------
-	# Ordenar resultados.
-	# --------------------------------------------------------
+        for service in "${sorted_services[@]}"; do
 
-	if [[ "${#SERVICES[@]}" -gt 1 ]]; then
+            for i in "${!SERVICES[@]}"; do
 
-		local sorted_services=()
+                if [[ "${SERVICES[$i]}" == "${service}" ]]; then
 
-		while IFS= read -r service_name; do
-			sorted_services+=("${service_name}")
-		done < <(
-			printf '%s\n' "${SERVICES[@]}" |
-				sort -V
-		)
+                    sorted_sources+=("${UNIT_SOURCES[$i]}")
+                    sorted_links+=("${UNIT_LINKS[$i]}")
 
-		SERVICES=("${sorted_services[@]}")
-	fi
+                    break
+                fi
 
-	return "${found}"
+            done
+
+        done
+
+        SERVICES=("${sorted_services[@]}")
+        UNIT_SOURCES=("${sorted_sources[@]}")
+        UNIT_LINKS=("${sorted_links[@]}")
+
+    fi
 }
 
 # ============================================================
@@ -499,139 +566,145 @@ discover_services() {
 
 discover_installation_directory() {
 
-	local service
-	local source
-	local working_directory
-	local candidate
-	local found_directory=""
+    local i
+    local source
+    local working_directory
+    local candidate
+    local found_directory=""
 
-	for service in "${SERVICES[@]}"; do
+    # --------------------------------------------------------
+    # Primero intentar WorkingDirectory.
+    # --------------------------------------------------------
 
-		source=""
+    for i in "${!SERVICES[@]}"; do
 
-		for index in "${!SERVICES[@]}"; do
+        source="${UNIT_SOURCES[$i]}"
 
-			if [[ "${SERVICES[$index]}" == "${service}" ]]; then
-				source="${UNIT_SOURCES[$index]}"
-				break
-			fi
+        [[ -f "${source}" ]] || continue
 
-		done
+        working_directory="$(
+            extract_working_directory "${source}"
+        )"
 
-		[[ -f "${source}" ]] || continue
+        if [[ -n "${working_directory}" &&
+              -d "${working_directory}" ]]; then
 
-		working_directory="$(
-			extract_working_directory "${source}"
-		)"
+            candidate="$(normalize_path "${working_directory}")"
 
-		if [[ -n "${working_directory}" &&
-			  -d "${working_directory}" ]]; then
+            if [[ -z "${found_directory}" ]]; then
 
-			candidate="$(normalize_path "${working_directory}")"
+                found_directory="${candidate}"
 
-			if [[ -z "${found_directory}" ]]; then
+            elif [[ "${candidate}" != "${found_directory}" ]]; then
 
-				found_directory="${candidate}"
-
-			elif [[ "${candidate}" != "${found_directory}" ]]; then
-
-				fail \
-					"Las instancias de HCR Server utilizan directorios de instalación diferentes:
+                fail \
+                    "Las instancias de HCR Server utilizan directorios de instalación diferentes:
 
 ${found_directory}
 
 ${candidate}"
 
-			fi
-		fi
+            fi
 
-	done
+        fi
 
-	# --------------------------------------------------------
-	# Si no se obtuvo WorkingDirectory, utilizar las unidades.
-	# --------------------------------------------------------
+    done
 
-	if [[ -z "${found_directory}" ]]; then
+    # --------------------------------------------------------
+    # Si no existe WorkingDirectory, usar directorio de unidad.
+    # --------------------------------------------------------
 
-		for source in "${UNIT_SOURCES[@]}"; do
+    if [[ -z "${found_directory}" ]]; then
 
-			if [[ -f "${source}" ]]; then
+        for source in "${UNIT_SOURCES[@]}"; do
 
-				candidate="$(dirname -- "${source}")"
+            [[ -f "${source}" ]] || continue
 
-				if [[ -z "${found_directory}" ]]; then
+            candidate="$(dirname -- "${source}")"
 
-					found_directory="$(normalize_path "${candidate}")"
+            if [[ -z "${found_directory}" ]]; then
 
-				elif [[ "${candidate}" != "${found_directory}" ]]; then
+                found_directory="$(normalize_path "${candidate}")"
 
-					fail \
-						"No se pudo determinar un único directorio de instalación."
+            elif [[ "${candidate}" != "${found_directory}" ]]; then
 
-				fi
-			fi
+                fail \
+                    "No se pudo determinar un único directorio de instalación."
 
-		done
-	fi
+            fi
 
-	[[ -n "${found_directory}" ]] ||
-		fail \
-			"No se pudo determinar el directorio de instalación de HCR Server."
+        done
 
-	INSTALL_DIR="${found_directory}"
+    fi
 
-	BINARY_PATH="${INSTALL_DIR}/hcr-server"
-	TLS_CERT_PATH="${INSTALL_DIR}/fullchain.pem"
-	TLS_KEY_PATH="${INSTALL_DIR}/privkey.pem"
+    [[ -n "${found_directory}" ]] ||
+        fail \
+            "No se pudo determinar el directorio de instalación de HCR Server."
+
+    INSTALL_DIR="${found_directory}"
+
+    BINARY_PATH="${INSTALL_DIR}/hcr-server"
+    TLS_CERT_PATH="${INSTALL_DIR}/fullchain.pem"
+    TLS_KEY_PATH="${INSTALL_DIR}/privkey.pem"
 }
 
 # ============================================================
-# VALIDAR UNIDAD
+# VALIDAR UNIDAD HCR
 # ============================================================
 
 validate_unit() {
 
-	local service="$1"
-	local source="$2"
-	local expected_binary
+    local service="$1"
+    local source="$2"
 
-	expected_binary="${BINARY_PATH}"
+    if [[ ! -f "${source}" ]]; then
 
-	[[ -f "${source}" ]] ||
-		fail \
-			"La unidad ${service} no existe:
+        fail \
+            "La unidad ${service} no existe:
 
 ${source}"
 
-	# --------------------------------------------------------
-	# Debe pertenecer a HCR.
-	# --------------------------------------------------------
+    fi
 
-	if ! grep -qE '^Description=HCR relay on port [0-9]+$' "${source}"; then
+    # --------------------------------------------------------
+    # Acepta:
+    #
+    # Description=HCR relay
+    #
+    # o:
+    #
+    # Description=HCR relay on port 8080
+    # --------------------------------------------------------
 
-		fail \
-			"La unidad ${service} no coincide con el formato del instalador HCR actual:
+    if ! grep -qE \
+        '^Description=HCR relay( on port [0-9]+)?$' \
+        "${source}"; then
+
+        fail \
+            "La unidad ${service} no coincide con una unidad HCR Server reconocible:
 
 ${source}"
-	fi
 
-	# --------------------------------------------------------
-	# Debe utilizar nuestro binario.
-	# --------------------------------------------------------
+    fi
 
-	if ! grep -qF \
-		"ExecStart=${expected_binary}" \
-		"${source}"; then
+    # --------------------------------------------------------
+    # Comprobar binario.
+    # --------------------------------------------------------
 
-		fail \
-			"La unidad ${service} no apunta al binario esperado:
+    if ! grep -qF \
+        "ExecStart=${BINARY_PATH}" \
+        "${source}"; then
+
+        fail \
+            "La unidad ${service} no apunta al binario esperado:
 
 ${source}
 
 Binario esperado:
 
-${expected_binary}"
-	fi
+${BINARY_PATH}"
+
+    fi
 }
 
 # ============================================================
@@ -640,205 +713,236 @@ ${expected_binary}"
 
 validate_installation() {
 
-	local index
-	local service
-	local source
-	local link
+    local i
+    local service
+    local source
+    local link
 
-	section "LOCALIZANDO INSTALACIÓN"
+    section "LOCALIZANDO INSTALACIÓN"
 
-	if [[ "${#SERVICES[@]}" -eq 0 ]]; then
+    if [[ "${#SERVICES[@]}" -eq 0 ]]; then
 
-		error_message \
-			"No se encontró ninguna instancia instalada de HCR Server."
+        error_message \
+            "No se encontró ninguna instancia instalada de HCR Server."
 
-		printf '\n'
+        printf '\n'
 
-		detail "Se buscaron unidades con el formato:"
-		detail "${SERVICE_PREFIX}-<PUERTO>.service"
+        detail \
+            "Se buscaron unidades con el formato:"
 
-		printf '\n'
+        detail \
+            "${SERVICE_PREFIX}-<PUERTO>.service"
 
-		info \
-			"Ejemplo esperado: hcr-server-8080.service"
+        printf '\n'
 
-		exit 0
-	fi
+        info \
+            "Ejemplo esperado: hcr-server-8080.service"
 
-	discover_installation_directory
+        exit 0
+    fi
 
-	printf '\n'
+    discover_installation_directory
 
-	success \
-		"Se encontraron ${#SERVICES[@]} instancia(s) de HCR Server."
+    printf '\n'
 
-	printf '\n'
+    success \
+        "Se encontraron ${#SERVICES[@]} instancia(s) de HCR Server."
 
-	for index in "${!SERVICES[@]}"; do
+    printf '\n'
 
-		service="${SERVICES[$index]}"
-		source="${UNIT_SOURCES[$index]}"
-		link="${UNIT_LINKS[$index]}"
+    for i in "${!SERVICES[@]}"; do
 
-		detail "Servicio: ${service}"
-		detail "Unidad: ${source}"
-		detail "Enlace: ${link}"
+        service="${SERVICES[$i]}"
+        source="${UNIT_SOURCES[$i]}"
+        link="${UNIT_LINKS[$i]}"
 
-		validate_unit \
-			"${service}" \
-			"${source}"
+        detail "Servicio: ${service}"
+        detail "Unidad: ${source}"
+        detail "Enlace: ${link}"
 
-	done
+        validate_unit \
+            "${service}" \
+            "${source}"
 
-	printf '\n'
+    done
 
-	detail "Directorio de instalación: ${INSTALL_DIR}"
-	detail "Binario: ${BINARY_PATH}"
-	detail "Certificado: ${TLS_CERT_PATH}"
-	detail "Clave privada: ${TLS_KEY_PATH}"
+    printf '\n'
 
-	printf '\n'
+    detail \
+        "Directorio de instalación: ${INSTALL_DIR}"
 
-	success "Instalación localizada correctamente."
+    detail \
+        "Binario: ${BINARY_PATH}"
+
+    detail \
+        "Certificado: ${TLS_CERT_PATH}"
+
+    detail \
+        "Clave privada: ${TLS_KEY_PATH}"
+
+    printf '\n'
+
+    success \
+        "Instalación localizada correctamente."
 }
 
 # ============================================================
-# MOSTRAR RESUMEN ANTES DE ELIMINAR
+# CONFIRMACIÓN
 # ============================================================
 
 confirm_uninstall() {
 
-	local service
+    local service
+    local answer
 
-	printf '\n'
+    printf '\n'
 
-	warning \
-		"Esta acción eliminará el servicio y sus archivos de instalación."
+    warning \
+        "Esta acción eliminará el servicio y sus archivos de instalación."
 
-	printf '\n'
+    printf '\n'
 
-	printf '%b\n' \
-		"${BOLD}${WHITE}Instancias detectadas:${RESET}"
+    printf '%b\n' \
+        "${BOLD}${BRIGHT_WHITE}Instancias detectadas:${RESET}"
 
-	for service in "${SERVICES[@]}"; do
-		detail "${service}"
-	done
+    for service in "${SERVICES[@]}"; do
 
-	printf '\n'
+        detail "${service}"
 
-	detail "Directorio:     ${INSTALL_DIR}"
-	detail "Binario:        ${BINARY_PATH}"
-	detail "Certificado:    ${TLS_CERT_PATH}"
-	detail "Clave privada:  ${TLS_KEY_PATH}"
+    done
 
-	printf '\n'
+    printf '\n'
 
-	warning \
-		"El directorio completo del panel NO será eliminado."
+    detail "Directorio:     ${INSTALL_DIR}"
+    detail "Binario:        ${BINARY_PATH}"
+    detail "Certificado:    ${TLS_CERT_PATH}"
+    detail "Clave privada:  ${TLS_KEY_PATH}"
 
-	warning \
-		"Solo se eliminarán los archivos pertenecientes a HCR Server."
+    printf '\n'
 
-	printf '\n'
+    warning \
+        "El directorio completo del panel NO será eliminado."
 
-	read -r -p \
-		"¿Deseas continuar? [s/N]: " answer
+    warning \
+        "Solo se eliminarán los archivos pertenecientes a HCR Server."
 
-	case "${answer,,}" in
+    printf '\n'
 
-		s|si|sí|y|yes)
-			printf '\n'
-			;;
+    read -r -p \
+        "¿Deseas continuar? [s/N]: " answer
 
-		*)
-			printf '\n'
-			info "Desinstalación cancelada."
-			exit 0
-			;;
+    case "${answer,,}" in
 
-	esac
+        s|si|sí|y|yes)
+
+            printf '\n'
+            ;;
+
+        *)
+
+            printf '\n'
+
+            info \
+                "Desinstalación cancelada."
+
+            exit 0
+            ;;
+
+    esac
 }
 
 # ============================================================
-# DETENER TODAS LAS INSTANCIAS
+# DETENER SERVICIOS
 # ============================================================
 
 stop_services() {
 
-	local service
+    local service
 
-	section "DETENIENDO SERVICIOS"
+    section "DETENIENDO SERVICIOS"
 
-	for service in "${SERVICES[@]}"; do
+    for service in "${SERVICES[@]}"; do
 
-		if systemctl is-active --quiet \
-			"${service}" 2>/dev/null; then
+        if systemctl is-active \
+            --quiet \
+            "${service}" \
+            2>/dev/null; then
 
-			spinner_start \
-				"Deteniendo ${service}..."
+            spinner_start \
+                "Deteniendo ${service}..."
 
-			if systemctl stop "${service}"; then
+            if systemctl stop "${service}"; then
 
-				spinner_stop
+                spinner_stop
 
-				success \
-					"${service} detenido."
+                success \
+                    "${service} detenido."
 
-			else
+            else
 
-				spinner_stop
+                spinner_stop
 
-				fail \
-					"No se pudo detener ${service}."
-			fi
+                fail \
+                    "No se pudo detener ${service}."
 
-		else
+            fi
 
-			info \
-				"${service} ya estaba detenido."
-		fi
-	done
+        else
+
+            info \
+                "${service} ya estaba detenido."
+
+        fi
+
+    done
 }
 
 # ============================================================
-# DESHABILITAR TODAS LAS INSTANCIAS
+# DESHABILITAR SERVICIOS
 # ============================================================
 
 disable_services() {
 
-	local service
+    local service
 
-	section "DESHABILITANDO SERVICIOS"
+    section "DESHABILITANDO SERVICIOS"
 
-	for service in "${SERVICES[@]}"; do
+    for service in "${SERVICES[@]}"; do
 
-		if systemctl is-enabled --quiet \
-			"${service}" 2>/dev/null; then
+        if systemctl is-enabled \
+            --quiet \
+            "${service}" \
+            2>/dev/null; then
 
-			spinner_start \
-				"Deshabilitando ${service}..."
+            spinner_start \
+                "Deshabilitando ${service}..."
 
-			if systemctl disable "${service}" >/dev/null 2>&1; then
+            if systemctl disable \
+                "${service}" \
+                >/dev/null 2>&1; then
 
-				spinner_stop
+                spinner_stop
 
-				success \
-					"${service} deshabilitado."
+                success \
+                    "${service} deshabilitado."
 
-			else
+            else
 
-				spinner_stop
+                spinner_stop
 
-				fail \
-					"No se pudo deshabilitar ${service}."
-			fi
+                fail \
+                    "No se pudo deshabilitar ${service}."
 
-		else
+            fi
 
-			info \
-				"${service} ya estaba deshabilitado."
-		fi
-	done
+        else
+
+            info \
+                "${service} ya estaba deshabilitado."
+
+        fi
+
+    done
 }
 
 # ============================================================
@@ -847,41 +951,44 @@ disable_services() {
 
 remove_dropins() {
 
-	local service
-	local dropin_dir
+    local service
+    local dropin_dir
 
-	section "ELIMINANDO DROP-INS"
+    section "ELIMINANDO DROP-INS"
 
-	for service in "${SERVICES[@]}"; do
+    for service in "${SERVICES[@]}"; do
 
-		dropin_dir="${SYSTEMD_DIR}/${service}.d"
+        dropin_dir="${SYSTEMD_DIR}/${service}.d"
 
-		if [[ -d "${dropin_dir}" ]]; then
+        if [[ -d "${dropin_dir}" ]]; then
 
-			spinner_start \
-				"Eliminando configuración adicional de ${service}..."
+            spinner_start \
+                "Eliminando configuración adicional de ${service}..."
 
-			if rm -rf -- "${dropin_dir}"; then
+            if rm -rf -- "${dropin_dir}"; then
 
-				spinner_stop
+                spinner_stop
 
-				success \
-					"Drop-ins eliminados: ${service}"
+                success \
+                    "Drop-ins eliminados: ${service}"
 
-			else
+            else
 
-				spinner_stop
+                spinner_stop
 
-				fail \
-					"No se pudieron eliminar los drop-ins de ${service}."
-			fi
+                fail \
+                    "No se pudieron eliminar los drop-ins de ${service}."
 
-		else
+            fi
 
-			info \
-				"No existen drop-ins para ${service}."
-		fi
-	done
+        else
+
+            info \
+                "No existen drop-ins para ${service}."
+
+        fi
+
+    done
 }
 
 # ============================================================
@@ -890,222 +997,198 @@ remove_dropins() {
 
 remove_units() {
 
-	local index
-	local service
-	local link
-	local source
+    local i
+    local service
+    local link
 
-	section "ELIMINANDO UNIDADES SYSTEMD"
+    section "ELIMINANDO UNIDADES SYSTEMD"
 
-	for index in "${!SERVICES[@]}"; do
+    for i in "${!SERVICES[@]}"; do
 
-		service="${SERVICES[$index]}"
-		link="${UNIT_LINKS[$index]}"
-		source="${UNIT_SOURCES[$index]}"
+        service="${SERVICES[$i]}"
+        link="${UNIT_LINKS[$i]}"
 
-		# ----------------------------------------------------
-		# Eliminar enlace/unidad en /etc/systemd/system.
-		# ----------------------------------------------------
+        if [[ -e "${link}" || -L "${link}" ]]; then
 
-		if [[ -e "${link}" || -L "${link}" ]]; then
+            spinner_start \
+                "Eliminando ${service}..."
 
-			spinner_start \
-				"Eliminando ${service}..."
+            if rm -f -- "${link}"; then
 
-			if rm -f -- "${link}"; then
+                spinner_stop
 
-				spinner_stop
+                success \
+                    "Unidad/enlace eliminado: ${service}"
 
-				success \
-					"Unidad/enlace eliminado: ${service}"
+            else
 
-			else
+                spinner_stop
 
-				spinner_stop
+                fail \
+                    "No se pudo eliminar ${link}."
 
-				fail \
-					"No se pudo eliminar ${link}."
-			fi
+            fi
 
-		else
+        else
 
-			info \
-				"La unidad ${link} ya no existe."
-		fi
+            info \
+                "La unidad ${link} ya no existe."
 
-		# ----------------------------------------------------
-		# Si la fuente está fuera del directorio de instalación,
-		# se eliminará posteriormente junto con las unidades.
-		# ----------------------------------------------------
+        fi
 
-		if [[ -f "${source}" &&
-			  "${source}" != "${UNIT_LINKS[$index]}" ]]; then
+    done
 
-			# La fuente normalmente está en INSTALL_DIR.
-			# Se elimina en remove_installation_files.
-			true
-		fi
-	done
+    # --------------------------------------------------------
+    # Recargar systemd.
+    # --------------------------------------------------------
 
-	# --------------------------------------------------------
-	# Recargar systemd después de eliminar unidades.
-	# --------------------------------------------------------
+    spinner_start \
+        "Recargando configuración de systemd..."
 
-	spinner_start \
-		"Recargando configuración de systemd..."
+    if systemctl daemon-reload; then
 
-	if systemctl daemon-reload; then
+        spinner_stop
 
-		spinner_stop
+        success \
+            "systemd recargado correctamente."
 
-		success \
-			"systemd recargado correctamente."
+    else
 
-	else
+        spinner_stop
 
-		spinner_stop
+        fail \
+            "No se pudo recargar systemd."
 
-		fail \
-			"No se pudo recargar systemd."
-	fi
+    fi
 
-	# --------------------------------------------------------
-	# Limpiar estados failed.
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Limpiar estados failed.
+    # --------------------------------------------------------
 
-	for service in "${SERVICES[@]}"; do
+    for service in "${SERVICES[@]}"; do
 
-		systemctl reset-failed \
-			"${service}" \
-			>/dev/null 2>&1 ||
-			true
+        systemctl reset-failed \
+            "${service}" \
+            >/dev/null 2>&1 ||
+            true
 
-	done
+    done
+}
+
+# ============================================================
+# ELIMINAR ARCHIVO
+# ============================================================
+
+remove_file_if_exists() {
+
+    local description="$1"
+    local file="$2"
+
+    if [[ -e "${file}" || -L "${file}" ]]; then
+
+        spinner_start \
+            "Eliminando ${description}..."
+
+        if rm -f -- "${file}"; then
+
+            spinner_stop
+
+            success \
+                "${description} eliminado."
+
+        else
+
+            spinner_stop
+
+            fail \
+                "No se pudo eliminar: ${file}"
+
+        fi
+
+    else
+
+        info \
+            "${description} ya no existe."
+
+    fi
 }
 
 # ============================================================
 # ELIMINAR ARCHIVOS DE INSTALACIÓN
 # ============================================================
 
-remove_file_if_exists() {
-
-	local description="$1"
-	local file="$2"
-
-	if [[ -e "${file}" || -L "${file}" ]]; then
-
-		spinner_start \
-			"Eliminando ${description}..."
-
-		if rm -f -- "${file}"; then
-
-			spinner_stop
-
-			success \
-				"${description} eliminado."
-
-		else
-
-			spinner_stop
-
-			fail \
-				"No se pudo eliminar: ${file}"
-		fi
-
-	else
-
-		info \
-			"${description} ya no existe."
-	fi
-}
-
 remove_installation_files() {
 
-	local service
-	local source
-	local temp_file
-	local index
+    local i
+    local source
+    local temp_file
 
-	section "ELIMINANDO ARCHIVOS DE HCR SERVER"
+    section "ELIMINANDO ARCHIVOS DE HCR SERVER"
 
-	# --------------------------------------------------------
-	# Eliminar unidades fuente.
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Unidades fuente dentro del directorio de instalación.
+    # --------------------------------------------------------
 
-	for index in "${!SERVICES[@]}"; do
+    for i in "${!SERVICES[@]}"; do
 
-		source="${UNIT_SOURCES[$index]}"
+        source="${UNIT_SOURCES[$i]}"
 
-		# Evitar eliminar algo fuera del directorio detectado.
-		if [[ "${source}" == "${INSTALL_DIR}/"* ]]; then
+        if [[ "${source}" == "${INSTALL_DIR}/"* ]]; then
 
-			remove_file_if_exists \
-				"Unidad ${SERVICES[$index]}" \
-				"${source}"
+            remove_file_if_exists \
+                "Unidad ${SERVICES[$i]}" \
+                "${source}"
 
-		fi
-	done
+        fi
 
-	# --------------------------------------------------------
-	# Binario
-	# --------------------------------------------------------
+    done
 
-	remove_file_if_exists \
-		"Binario HCR Server" \
-		"${BINARY_PATH}"
+    # --------------------------------------------------------
+    # Binario.
+    # --------------------------------------------------------
 
-	# --------------------------------------------------------
-	# TLS
-	# --------------------------------------------------------
+    remove_file_if_exists \
+        "Binario HCR Server" \
+        "${BINARY_PATH}"
 
-	remove_file_if_exists \
-		"Certificado TLS" \
-		"${TLS_CERT_PATH}"
+    # --------------------------------------------------------
+    # Certificado.
+    # --------------------------------------------------------
 
-	remove_file_if_exists \
-		"Clave privada TLS" \
-		"${TLS_KEY_PATH}"
+    remove_file_if_exists \
+        "Certificado TLS" \
+        "${TLS_CERT_PATH}"
 
-	# --------------------------------------------------------
-	# Temporales creados por el instalador.
-	#
-	# Ejemplo:
-	# .hcr-server-8080.XXXXXX.service
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Clave privada.
+    # --------------------------------------------------------
 
-	while IFS= read -r -d '' temp_file; do
+    remove_file_if_exists \
+        "Clave privada TLS" \
+        "${TLS_KEY_PATH}"
 
-		remove_file_if_exists \
-			"Archivo temporal de systemd" \
-			"${temp_file}"
+    # --------------------------------------------------------
+    # Temporales.
+    # --------------------------------------------------------
 
-	done < <(
-		find "${INSTALL_DIR}" \
-			-maxdepth 1 \
-			-type f \
-			-name ".${SERVICE_PREFIX}-*.service" \
-			-print0 \
-			2>/dev/null
-	)
+    while IFS= read -r -d '' temp_file; do
 
-	# --------------------------------------------------------
-	# Otros temporales ocultos relacionados con systemd.
-	# --------------------------------------------------------
+        remove_file_if_exists \
+            "Archivo temporal HCR" \
+            "${temp_file}"
 
-	while IFS= read -r -d '' temp_file; do
-
-		remove_file_if_exists \
-			"Archivo temporal HCR" \
-			"${temp_file}"
-
-	done < <(
-		find "${INSTALL_DIR}" \
-			-maxdepth 1 \
-			-type f \
-			-name ".${SERVICE_PREFIX}-*.XXXXXX*" \
-			-print0 \
-			2>/dev/null
-	)
+    done < <(
+        find "${INSTALL_DIR}" \
+            -maxdepth 1 \
+            -type f \
+            \( \
+                -name ".${SERVICE_PREFIX}-*.service" \
+                -o \
+                -name ".${SERVICE_PREFIX}-*.XXXXXX*" \
+            \) \
+            -print0 \
+            2>/dev/null
+    )
 }
 
 # ============================================================
@@ -1114,38 +1197,40 @@ remove_installation_files() {
 
 verify_no_processes() {
 
-	local service
-	local pid
-	local failed=0
+    local service
+    local pid
+    local failed=0
 
-	section "VERIFICANDO PROCESOS"
+    section "VERIFICANDO PROCESOS"
 
-	for service in "${SERVICES[@]}"; do
+    for service in "${SERVICES[@]}"; do
 
-		pid="$(
-			systemctl show \
-				--property=MainPID \
-				--value \
-				"${service}" \
-				2>/dev/null ||
-				true
-		)"
+        pid="$(
+            systemctl show \
+                --property=MainPID \
+                --value \
+                "${service}" \
+                2>/dev/null ||
+                true
+        )"
 
-		if [[ "${pid}" =~ ^[1-9][0-9]*$ ]]; then
+        if [[ "${pid}" =~ ^[1-9][0-9]*$ ]]; then
 
-			error_message \
-				"${service} todavía reporta un proceso principal: PID ${pid}"
+            error_message \
+                "${service} todavía reporta un proceso principal: PID ${pid}"
 
-			failed=1
+            failed=1
 
-		else
+        else
 
-			success \
-				"No queda proceso principal para ${service}."
-		fi
-	done
+            success \
+                "No queda proceso principal para ${service}."
 
-	return "${failed}"
+        fi
+
+    done
+
+    return "${failed}"
 }
 
 # ============================================================
@@ -1154,205 +1239,232 @@ verify_no_processes() {
 
 verify_uninstall() {
 
-	local service
-	local index
-	local link
-	local source
-	local dropin_dir
-	local failed=0
+    local service
+    local i
+    local link
+    local source
+    local dropin_dir
+    local failed=0
 
-	section "VERIFICACIÓN FINAL"
+    section "VERIFICACIÓN FINAL"
 
-	# --------------------------------------------------------
-	# Servicios
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Servicios.
+    # --------------------------------------------------------
 
-	for service in "${SERVICES[@]}"; do
+    for service in "${SERVICES[@]}"; do
 
-		if systemctl is-active --quiet \
-			"${service}" 2>/dev/null; then
+        if systemctl is-active \
+            --quiet \
+            "${service}" \
+            2>/dev/null; then
 
-			error_message \
-				"${service} todavía está activo."
+            error_message \
+                "${service} todavía está activo."
 
-			failed=1
+            failed=1
 
-		else
+        else
 
-			success \
-				"${service} está detenido."
+            success \
+                "${service} está detenido."
 
-		fi
+        fi
 
-		if systemctl is-enabled --quiet \
-			"${service}" 2>/dev/null; then
+        if systemctl is-enabled \
+            --quiet \
+            "${service}" \
+            2>/dev/null; then
 
-			error_message \
-				"${service} todavía está habilitado."
+            error_message \
+                "${service} todavía está habilitado."
 
-			failed=1
+            failed=1
 
-		else
+        else
 
-			success \
-				"${service} está deshabilitado."
+            success \
+                "${service} está deshabilitado."
 
-		fi
+        fi
 
-	done
+    done
 
-	# --------------------------------------------------------
-	# Unidades
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Unidades.
+    # --------------------------------------------------------
 
-	for index in "${!SERVICES[@]}"; do
+    for i in "${!SERVICES[@]}"; do
 
-		link="${UNIT_LINKS[$index]}"
-		source="${UNIT_SOURCES[$index]}"
+        link="${UNIT_LINKS[$i]}"
+        source="${UNIT_SOURCES[$i]}"
 
-		if [[ -e "${link}" || -L "${link}" ]]; then
+        if [[ -e "${link}" || -L "${link}" ]]; then
 
-			error_message \
-				"La unidad todavía existe: ${link}"
+            error_message \
+                "La unidad todavía existe: ${link}"
 
-			failed=1
+            failed=1
 
-		else
+        else
 
-			success \
-				"Unidad eliminada: $(basename -- "${link}")"
-		fi
+            success \
+                "Unidad eliminada: $(basename -- "${link}")"
 
-		if [[ -e "${source}" || -L "${source}" ]]; then
+        fi
 
-			error_message \
-				"La unidad fuente todavía existe: ${source}"
+        if [[ -e "${source}" || -L "${source}" ]]; then
 
-			failed=1
+            error_message \
+                "La unidad fuente todavía existe: ${source}"
 
-		else
+            failed=1
 
-			success \
-				"Unidad fuente eliminada."
-		fi
+        else
 
-		dropin_dir="${SYSTEMD_DIR}/${SERVICES[$index]}.d"
+            success \
+                "Unidad fuente eliminada."
 
-		if [[ -e "${dropin_dir}" ]]; then
+        fi
 
-			error_message \
-				"El drop-in todavía existe: ${dropin_dir}"
+        dropin_dir="${SYSTEMD_DIR}/${SERVICES[$i]}.d"
 
-			failed=1
+        if [[ -e "${dropin_dir}" ]]; then
 
-		else
+            error_message \
+                "El drop-in todavía existe: ${dropin_dir}"
 
-			success \
-				"Drop-ins eliminados."
-		fi
-	done
+            failed=1
 
-	# --------------------------------------------------------
-	# Archivos
-	# --------------------------------------------------------
+        else
 
-	if [[ -e "${BINARY_PATH}" ]]; then
+            success \
+                "Drop-ins eliminados."
 
-		error_message \
-			"El binario todavía existe: ${BINARY_PATH}"
+        fi
 
-		failed=1
+    done
 
-	else
+    # --------------------------------------------------------
+    # Binario.
+    # --------------------------------------------------------
 
-		success \
-			"Binario HCR eliminado."
-	fi
+    if [[ -e "${BINARY_PATH}" ]]; then
 
-	if [[ -e "${TLS_CERT_PATH}" ]]; then
+        error_message \
+            "El binario todavía existe: ${BINARY_PATH}"
 
-		error_message \
-			"El certificado todavía existe: ${TLS_CERT_PATH}"
+        failed=1
 
-		failed=1
+    else
 
-	else
+        success \
+            "Binario HCR eliminado."
 
-		success \
-			"Certificado TLS eliminado."
-	fi
+    fi
 
-	if [[ -e "${TLS_KEY_PATH}" ]]; then
+    # --------------------------------------------------------
+    # Certificado.
+    # --------------------------------------------------------
 
-		error_message \
-			"La clave privada todavía existe: ${TLS_KEY_PATH}"
+    if [[ -e "${TLS_CERT_PATH}" ]]; then
 
-		failed=1
+        error_message \
+            "El certificado todavía existe: ${TLS_CERT_PATH}"
 
-	else
+        failed=1
 
-		success \
-			"Clave privada TLS eliminada."
-	fi
+    else
 
-	# --------------------------------------------------------
-	# Procesos
-	# --------------------------------------------------------
+        success \
+            "Certificado TLS eliminado."
 
-	if ! verify_no_processes; then
-		failed=1
-	fi
+    fi
 
-	return "${failed}"
+    # --------------------------------------------------------
+    # Clave privada.
+    # --------------------------------------------------------
+
+    if [[ -e "${TLS_KEY_PATH}" ]]; then
+
+        error_message \
+            "La clave privada todavía existe: ${TLS_KEY_PATH}"
+
+        failed=1
+
+    else
+
+        success \
+            "Clave privada TLS eliminada."
+
+    fi
+
+    # --------------------------------------------------------
+    # Procesos.
+    # --------------------------------------------------------
+
+    if ! verify_no_processes; then
+        failed=1
+    fi
+
+    return "${failed}"
 }
 
 # ============================================================
-# ELIMINAR DESINSTALADOR
+# ELIMINAR ESTE DESINSTALADOR
 # ============================================================
 
 remove_self() {
 
-	if [[ -f "${SCRIPT_PATH}" ]]; then
+    if [[ -f "${SCRIPT_PATH}" ]]; then
 
-		spinner_start \
-			"Eliminando desinstalador..."
+        spinner_start \
+            "Eliminando desinstalador..."
 
-		if rm -f -- "${SCRIPT_PATH}"; then
+        if rm -f -- "${SCRIPT_PATH}"; then
 
-			spinner_stop
+            spinner_stop
 
-			success \
-				"Desinstalador eliminado."
+            success \
+                "Desinstalador eliminado."
 
-		else
+        else
 
-			spinner_stop
+            spinner_stop
 
-			error_message \
-				"No se pudo eliminar automáticamente el desinstalador."
+            error_message \
+                "No se pudo eliminar automáticamente el desinstalador."
 
-			return 1
-		fi
-	else
+            return 1
 
-		info \
-			"El desinstalador ya no existe."
-	fi
+        fi
 
-	return 0
+    else
+
+        info \
+            "El desinstalador ya no existe."
+
+    fi
+
+    return 0
 }
 
 # ============================================================
-# LIMPIAR LOCK
+# ELIMINAR LOCK
 # ============================================================
 
 remove_lock_file() {
 
-	local lock_file="${SYSTEMD_DIR}/.${SERVICE_PREFIX}.uninstall.lock"
+    local lock_file
 
-	release_uninstall_lock
+    lock_file="${SYSTEMD_DIR}/.${SERVICE_PREFIX}.uninstall.lock"
 
-	rm -f -- "${lock_file}" >/dev/null 2>&1 || true
+    release_uninstall_lock
+
+    rm -f \
+        -- "${lock_file}" \
+        >/dev/null 2>&1 ||
+        true
 }
 
 # ============================================================
@@ -1361,50 +1473,50 @@ remove_lock_file() {
 
 show_summary() {
 
-	printf '\n'
+    printf '\n'
 
-	line
+    line
 
-	printf '%b\n' \
-		"${BRIGHT_GREEN}${BOLD}✔ DESINSTALACIÓN COMPLETADA${RESET}"
+    printf '%b\n' \
+        "${BRIGHT_GREEN}${BOLD}✔ DESINSTALACIÓN COMPLETADA${RESET}"
 
-	printf '\n'
+    printf '\n'
 
-	detail \
-		"Todas las instancias de HCR Server fueron detenidas."
+    detail \
+        "Todas las instancias de HCR Server fueron detenidas."
 
-	detail \
-		"Todos los servicios fueron deshabilitados."
+    detail \
+        "Todos los servicios fueron deshabilitados."
 
-	detail \
-		"Todas las unidades systemd fueron eliminadas."
+    detail \
+        "Todas las unidades systemd fueron eliminadas."
 
-	detail \
-		"Los drop-ins de HCR Server fueron eliminados."
+    detail \
+        "Los drop-ins de HCR Server fueron eliminados."
 
-	detail \
-		"El binario hcr-server fue eliminado."
+    detail \
+        "El binario hcr-server fue eliminado."
 
-	detail \
-		"El certificado TLS fue eliminado."
+    detail \
+        "El certificado TLS fue eliminado."
 
-	detail \
-		"La clave privada TLS fue eliminada."
+    detail \
+        "La clave privada TLS fue eliminada."
 
-	detail \
-		"Los archivos temporales fueron eliminados."
+    detail \
+        "Los archivos temporales fueron eliminados."
 
-	printf '\n'
+    printf '\n'
 
-	printf '%b\n' \
-		"${DIM}El directorio del panel NO fue eliminado.${RESET}"
+    printf '%b\n' \
+        "${DIM}El directorio del panel NO fue eliminado.${RESET}"
 
-	printf '%b\n' \
-		"${DIM}La instalación de HCR Server fue retirada del sistema.${RESET}"
+    printf '%b\n' \
+        "${DIM}La instalación de HCR Server fue retirada del sistema.${RESET}"
 
-	line
+    line
 
-	printf '\n'
+    printf '\n'
 }
 
 # ============================================================
@@ -1413,142 +1525,154 @@ show_summary() {
 
 main() {
 
-	header
+    header
 
-	# --------------------------------------------------------
-	# ENTORNO
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Entorno.
+    # --------------------------------------------------------
 
-	section "VERIFICANDO ENTORNO"
+    section "VERIFICANDO ENTORNO"
 
-	require_environment
+    require_environment
 
-	success \
-		"Entorno Linux + systemd válido."
+    success \
+        "Entorno Linux + systemd válido."
 
-	# --------------------------------------------------------
-	# BLOQUEO
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Lock.
+    # --------------------------------------------------------
 
-	acquire_uninstall_lock
+    acquire_uninstall_lock
 
-	success \
-		"Bloqueo de desinstalación adquirido."
+    success \
+        "Bloqueo de desinstalación adquirido."
 
-	# --------------------------------------------------------
-	# DETECCIÓN
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Detectar servicios.
+    # --------------------------------------------------------
 
-	discover_services
+    discover_services
 
-	# --------------------------------------------------------
-	# VALIDACIÓN
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Validar instalación.
+    # --------------------------------------------------------
 
-	validate_installation
+    validate_installation
 
-	# --------------------------------------------------------
-	# CONFIRMACIÓN
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Confirmación.
+    # --------------------------------------------------------
 
-	confirm_uninstall
+    confirm_uninstall
 
-	# --------------------------------------------------------
-	# DETENER
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Detener.
+    # --------------------------------------------------------
 
-	stop_services
+    stop_services
 
-	# --------------------------------------------------------
-	# DESHABILITAR
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Deshabilitar.
+    # --------------------------------------------------------
 
-	disable_services
+    disable_services
 
-	# --------------------------------------------------------
-	# DROP-INS
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Drop-ins.
+    # --------------------------------------------------------
 
-	remove_dropins
+    remove_dropins
 
-	# --------------------------------------------------------
-	# UNIDADES
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Unidades.
+    # --------------------------------------------------------
 
-	remove_units
+    remove_units
 
-	# --------------------------------------------------------
-	# ARCHIVOS
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Archivos.
+    # --------------------------------------------------------
 
-	remove_installation_files
+    remove_installation_files
 
-	# --------------------------------------------------------
-	# VERIFICACIÓN
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Verificación.
+    # --------------------------------------------------------
 
-	if ! verify_uninstall; then
+    if ! verify_uninstall; then
 
-		printf '\n'
+        printf '\n'
 
-		error_message \
-			"La desinstalación terminó con elementos pendientes."
+        error_message \
+            "La desinstalación terminó con elementos pendientes."
 
-		printf '\n'
+        printf '\n'
 
-		warning \
-			"No se eliminará automáticamente el desinstalador para permitir revisar el problema."
+        warning \
+            "No se eliminará automáticamente el desinstalador para permitir revisar el problema."
 
-		release_uninstall_lock
+        release_uninstall_lock
 
-		exit 1
-	fi
+        exit 1
+    fi
 
-	# --------------------------------------------------------
-	# ELIMINAR DESINSTALADOR
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Eliminar desinstalador.
+    # --------------------------------------------------------
 
-	if ! remove_self; then
+    if ! remove_self; then
 
-		printf '\n'
+        printf '\n'
 
-		warning \
-			"El servicio fue desinstalado correctamente, pero el desinstalador no pudo eliminarse."
+        warning \
+            "El servicio fue desinstalado correctamente, pero el desinstalador no pudo eliminarse."
 
-		release_uninstall_lock
+        release_uninstall_lock
 
-		exit 1
-	fi
+        exit 1
+    fi
 
-	# --------------------------------------------------------
-	# LOCK
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Lock.
+    # --------------------------------------------------------
 
-	remove_lock_file
+    remove_lock_file
 
-	# --------------------------------------------------------
-	# FINAL
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Final.
+    # --------------------------------------------------------
 
-	show_summary
+    show_summary
 }
 
 # ============================================================
-# LIMPIEZA ANTE INTERRUPCIÓN
+# LIMPIEZA AL SALIR
+# ============================================================
+#
+# IMPORTANTE:
+# No usamos "exit" dentro de esta función.
+# De esta manera evitamos que el EXIT trap se llame
+# recursivamente.
 # ============================================================
 
 cleanup_on_exit() {
 
-	local exit_code=$?
+    local exit_code=$?
 
-	spinner_stop
+    spinner_stop
 
-	if [[ "${LOCK_FD_OPEN}" == "true" ]]; then
-		release_uninstall_lock
-	fi
+    if [[ "${LOCK_FD_OPEN}" == "true" ]]; then
+        release_uninstall_lock
+    fi
 
-	exit "${exit_code}"
+    trap - EXIT
+
+    exit "${exit_code}"
 }
+
+# ============================================================
+# SEÑALES
+# ============================================================
 
 trap cleanup_on_exit EXIT
 trap 'exit 130' INT
@@ -1559,5 +1683,5 @@ trap 'exit 143' TERM
 # ============================================================
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-	main "$@"
+    main "$@"
 fi
