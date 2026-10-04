@@ -16,23 +16,10 @@ set -euo pipefail
 #   01  Instalar / reinstalar
 #   02  Desinstalar
 #   03  Gestión de puertos
-#       ├── Añadir puerto
-#       ├── Detener puerto
-#       ├── Modificar puerto
-#       └── Eliminar puerto
-#   04  Optimizar protocolo
-#   05  Reiniciar servicio
-#   06  Estado de puertos
-#
-# DETECCIÓN POR INSTANCIA:
-#
-#   - Puerto HCR
-#   - Puerto destino
-#   - Estado systemd
-#   - Estado real del listener
-#   - Transporte
-#   - Max Download Frame
-#   - Download Poll Timeout
+#   04  Estados de puerto
+#   05  Iniciar / Detener Servicio
+#   06  Reiniciar Servicio
+#   07  Optimizar HCR
 #
 # ============================================================
 
@@ -675,12 +662,16 @@ select_hcr_unit() {
                 ;;
         esac
 
-        echo -e "  ${CYAN}${index}${RESET}) ${WHITE}Puerto ${port:----}${RESET} ${GRAY}(${unit})${RESET}  ${state_display}"
+        printf "  ${CYAN}%02d${RESET}  ${WHITE}Puerto %-6s${RESET} ${GRAY}%-28s${RESET} %b\n" \
+            "$index" \
+            "${port:----}" \
+            "(${unit})" \
+            "$state_display"
 
     done <<< "$units"
 
     echo
-    echo -e "  ${GRAY}0) Cancelar${RESET}"
+    echo -e "  ${GRAY}00  Cancelar${RESET}"
     echo
 
     local option
@@ -689,7 +680,7 @@ select_hcr_unit() {
 
         read -rp "  Selecciona una instancia: " option
 
-        if [[ "$option" == "0" ]]; then
+        if [[ "$option" == "0" || "$option" == "00" ]]; then
             return 1
         fi
 
@@ -1147,6 +1138,152 @@ stop_port() {
 }
 
 # ============================================================
+# INICIAR / DETENER SERVICIO
+# ============================================================
+
+toggle_service() {
+
+    header
+
+    echo -e "  ${BOLD}${WHITE}INICIAR / DETENER SERVICIO${RESET}"
+    echo -e "  ${GRAY}Inicia o detiene una instancia HCR según su estado actual.${RESET}"
+    echo
+
+    if ! select_hcr_unit "Selecciona la instancia que deseas iniciar o detener"; then
+
+        info "Operación cancelada."
+
+        pause
+
+        return
+    fi
+
+    local unit="$SELECTED_UNIT"
+    local path="$SELECTED_PATH"
+    local port="$SELECTED_PORT"
+
+    local current_state
+
+    current_state="$(get_unit_state "$unit")"
+
+    echo
+
+    detail "Servicio: ${unit}"
+    detail "Puerto: ${port:----}"
+
+    echo
+
+    if [[ "$current_state" == "active" ]]; then
+
+        warning "La instancia está actualmente ACTIVA."
+        echo
+
+        read -rp "  ¿Deseas detenerla? [s/N]: " answer
+
+        case "${answer,,}" in
+            s|si|sí|y|yes)
+                ;;
+            *)
+                info "Operación cancelada."
+                pause
+                return
+                ;;
+        esac
+
+        echo
+
+        spinner_start "Deteniendo ${unit}..."
+
+        if systemctl stop "$unit" >/dev/null 2>&1; then
+
+            spinner_stop
+
+            success "Servicio detenido correctamente."
+
+        else
+
+            spinner_stop
+
+            error "No se pudo detener ${unit}."
+
+            pause
+            return
+        fi
+
+        echo
+
+        if is_port_listening "$port"; then
+            error "El puerto ${port} todavía aparece escuchando."
+        else
+            success "El puerto ${port} ya no está escuchando."
+        fi
+
+    else
+
+        warning "La instancia está actualmente DETENIDA."
+        echo
+
+        read -rp "  ¿Deseas iniciarla? [s/N]: " answer
+
+        case "${answer,,}" in
+            s|si|sí|y|yes)
+                ;;
+            *)
+                info "Operación cancelada."
+                pause
+                return
+                ;;
+        esac
+
+        echo
+
+        spinner_start "Iniciando ${unit}..."
+
+        if systemctl daemon-reload >/dev/null 2>&1 &&
+           systemctl start "$unit" >/dev/null 2>&1; then
+
+            spinner_stop
+
+            success "Servicio iniciado correctamente."
+
+        else
+
+            spinner_stop
+
+            error "No se pudo iniciar ${unit}."
+
+            echo
+
+            systemctl \
+                --no-pager \
+                --full \
+                status "$unit" 2>&1 || true
+
+            pause
+            return
+        fi
+
+        echo
+
+        sleep 1
+
+        if systemctl is-active --quiet "$unit"; then
+            success "systemd confirma que la instancia está activa."
+        else
+            error "La instancia no quedó activa."
+        fi
+
+        if is_port_listening "$port"; then
+            success "El puerto ${port} está escuchando correctamente."
+        else
+            warning "La instancia está activa, pero el puerto ${port} no aparece escuchando."
+        fi
+    fi
+
+    pause
+}
+
+# ============================================================
 # MODIFICAR PUERTO
 # ============================================================
 
@@ -1298,14 +1435,14 @@ prepare_instance_optimizer() {
 }
 
 # ============================================================
-# OPTIMIZAR PROTOCOLO
+# OPTIMIZAR HCR
 # ============================================================
 
 optimize_service() {
 
     header
 
-    echo -e "  ${BOLD}${WHITE}OPTIMIZAR PROTOCOLO${RESET}"
+    echo -e "  ${BOLD}${WHITE}OPTIMIZAR HCR${RESET}"
     echo -e "  ${GRAY}Ajusta rendimiento de una instancia HCR específica.${RESET}"
     echo
 
@@ -1492,28 +1629,39 @@ show_menu() {
     echo -e "  ${GRAY}Selecciona una operación${RESET}"
     echo
 
-    echo -e "  ${CYAN}01${RESET}  ${MAGENTA}➤${RESET}  ${WHITE}Instalar / reinstalar${RESET}"
+    printf "  ${CYAN}01${RESET}  ${MAGENTA}➤${RESET}  ${WHITE}%-24s${RESET}\n" \
+        "Instalar / reinstalar"
     echo -e "      ${GRAY}Instala o actualiza HCR Server${RESET}"
     echo
 
-    echo -e "  ${CYAN}02${RESET}  ${MAGENTA}◈${RESET}  ${WHITE}Desinstalar${RESET}"
+    printf "  ${CYAN}02${RESET}  ${MAGENTA}◈${RESET}  ${WHITE}%-24s${RESET}\n" \
+        "Desinstalar"
     echo -e "      ${GRAY}Elimina la instalación principal${RESET}"
     echo
 
-    echo -e "  ${CYAN}03${RESET}  ${MAGENTA}◉${RESET}  ${WHITE}Gestión de puertos${RESET}"
+    printf "  ${CYAN}03${RESET}  ${MAGENTA}◉${RESET}  ${WHITE}%-24s${RESET}\n" \
+        "Gestión de puertos"
     echo -e "      ${GRAY}Añadir, detener, modificar o eliminar instancias${RESET}"
     echo
 
-    echo -e "  ${CYAN}04${RESET}  ${MAGENTA}⚙${RESET}  ${WHITE}Optimizar protocolo${RESET}"
-    echo -e "      ${GRAY}Ajusta rendimiento de una instancia específica${RESET}"
+    printf "  ${CYAN}04${RESET}  ${MAGENTA}◉${RESET}  ${WHITE}%-24s${RESET}\n" \
+        "Estados de puerto"
+    echo -e "      ${GRAY}Muestra el estado real de todas las instancias${RESET}"
     echo
 
-    echo -e "  ${CYAN}05${RESET}  ${MAGENTA}↻${RESET}  ${WHITE}Reiniciar servicio${RESET}"
+    printf "  ${CYAN}05${RESET}  ${MAGENTA}↕${RESET}  ${WHITE}%-24s${RESET}\n" \
+        "Iniciar / Detener Servicio"
+    echo -e "      ${GRAY}Inicia o detiene una instancia HCR${RESET}"
+    echo
+
+    printf "  ${CYAN}06${RESET}  ${MAGENTA}↻${RESET}  ${WHITE}%-24s${RESET}\n" \
+        "Reiniciar Servicio"
     echo -e "      ${GRAY}Reinicia una instancia y valida su puerto${RESET}"
     echo
 
-    echo -e "  ${CYAN}06${RESET}  ${MAGENTA}◉${RESET}  ${WHITE}Estado de puertos${RESET}"
-    echo -e "      ${GRAY}Muestra todas las instancias y su estado real${RESET}"
+    printf "  ${CYAN}07${RESET}  ${MAGENTA}⚙${RESET}  ${WHITE}%-24s${RESET}\n" \
+        "Optimizar HCR"
+    echo -e "      ${GRAY}Ajusta el rendimiento de una instancia${RESET}"
     echo
 
     echo -e "  ${DARK}────────────────────────────────────────────────────────${RESET}"
@@ -1560,10 +1708,15 @@ main() {
 
             4|04)
 
-                optimize_service
+                show_general_status
                 ;;
 
             5|05)
+
+                toggle_service
+                ;;
+
+            6|06)
 
                 header
 
@@ -1574,9 +1727,9 @@ main() {
                 restart_selected_instance
                 ;;
 
-            6|06)
+            7|07)
 
-                show_general_status
+                optimize_service
                 ;;
 
             0|00)
