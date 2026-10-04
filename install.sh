@@ -20,6 +20,7 @@ SERVICE_NAME="hcr-server"
 SYSTEMD_DIR="/etc/systemd/system"
 
 PORT="8080"
+PORTS=()
 TARGET_PORT="22"
 
 # Ajustes de rendimiento
@@ -29,6 +30,7 @@ DOWNLOAD_POLL_TIMEOUT="5s"
 TRANSPORT="auto"
 
 TEMP_UNIT=""
+TEMP_UNITS=()
 
 # ------------------------------------------------------------
 # COLORES
@@ -263,7 +265,8 @@ check_port_available() {
 		return 0
 	fi
 
-	# Si HCR ya ocupa el puerto, permitimos continuar.
+	# Si una instancia HCR ya ocupa el puerto, permitimos
+	# continuar para poder reinstalar/reconfigurar esa instancia.
 	if echo "${listeners}" | grep -q '"hcr-server"'; then
 		return 0
 	fi
@@ -336,18 +339,51 @@ check_hcr_listener() {
 }
 
 # ------------------------------------------------------------
+# NOMBRE DE SERVICIO POR PUERTO
+# ------------------------------------------------------------
+
+service_name_for_port() {
+	local port="$1"
+
+	printf "%s-%s" \
+		"${SERVICE_NAME}" \
+		"${port}"
+}
+
+unit_source_path_for_port() {
+	local port="$1"
+
+	printf "%s/%s-%s.service" \
+		"${SCRIPT_DIR}" \
+		"${SERVICE_NAME}" \
+		"${port}"
+}
+
+unit_link_path_for_port() {
+	local port="$1"
+
+	printf "%s/%s-%s.service" \
+		"${SYSTEMD_DIR}" \
+		"${SERVICE_NAME}" \
+		"${port}"
+}
+
+# ------------------------------------------------------------
 # CONFIGURACIÓN DE PUERTOS
 # ------------------------------------------------------------
 
 configure_ports() {
 	local input
+	local port
+	local duplicate
+	local selected_ports=()
 
 	section "Configuración de puertos"
 
 	while true; do
 
 		printf \
-			"${WHITE}Puerto para HCR Server${RESET} ${DIM}[${PORT}]${RESET}: "
+			"${WHITE}Puertos para HCR Server${RESET} ${DIM}[${PORT}]${RESET}: "
 
 		read -r input
 
@@ -355,30 +391,78 @@ configure_ports() {
 			input="${PORT}"
 		fi
 
-		if ! validate_port "${input}"; then
+		# ----------------------------------------------------
+		# VALIDAR CADA PUERTO
+		# ----------------------------------------------------
 
-			error_message \
-				"Puerto no válido. Debe estar entre 1 y 65535."
+		selected_ports=()
 
+		for port in ${input}; do
+
+			if ! validate_port "${port}"; then
+
+				error_message \
+					"Puerto no válido: ${port}. Debe estar entre 1 y 65535."
+
+				selected_ports=()
+
+				break
+			fi
+
+			duplicate="false"
+
+			for existing_port in "${selected_ports[@]}"; do
+
+				if [ "${existing_port}" = "${port}" ]; then
+					duplicate="true"
+					break
+				fi
+
+			done
+
+			if [ "${duplicate}" = "true" ]; then
+
+				error_message \
+					"El puerto ${port} está duplicado."
+
+				selected_ports=()
+
+				break
+			fi
+
+			if ! check_port_available "${port}"; then
+
+				error_message \
+					"El puerto ${port} ya está siendo utilizado por otro servicio."
+
+				selected_ports=()
+
+				break
+			fi
+
+			selected_ports+=("${port}")
+
+		done
+
+		[ "${#selected_ports[@]}" -gt 0 ] ||
 			continue
-		fi
-
-		if ! check_port_available "${input}"; then
-
-			error_message \
-				"El puerto ${input} ya está siendo utilizado por otro servicio."
-
-			continue
-		fi
-
-		PORT="${input}"
 
 		break
+
 	done
 
-	success "Puerto HCR configurado: ${PORT}"
+	PORTS=("${selected_ports[@]}")
+	PORT="${PORTS[0]}"
 
-	configure_port_capability "${PORT}"
+	printf "\n"
+
+	for port in "${PORTS[@]}"; do
+
+		success "Puerto HCR configurado: ${port}"
+
+		configure_port_capability "${port}"
+
+	done
 
 	while true; do
 
@@ -555,45 +639,63 @@ validate_root_file() {
 
 validate_unit_link() {
 
-	if [ -L "${UNIT_LINK_PATH}" ]; then
+	local port
+	local unit_link
+	local unit_source
+	local service_name
 
-		[ "$(readlink -- "${UNIT_LINK_PATH}")" = "${UNIT_SOURCE_PATH}" ] ||
+	for port in "${PORTS[@]}"; do
+
+		unit_link="$(unit_link_path_for_port "${port}")"
+		unit_source="$(unit_source_path_for_port "${port}")"
+		service_name="$(service_name_for_port "${port}")"
+
+		if [ -L "${unit_link}" ]; then
+
+			[ "$(readlink -- "${unit_link}")" = "${unit_source}" ] ||
+				fail \
+					"Ya existe un enlace ${service_name}.service diferente."
+
+		elif [ -e "${unit_link}" ]; then
+
 			fail \
-				"Ya existe un enlace ${SERVICE_NAME}.service diferente."
+				"Ya existe una unidad no simbólica en ${unit_link}"
 
-	elif [ -e "${UNIT_LINK_PATH}" ]; then
+		fi
 
-		fail \
-			"Ya existe una unidad no simbólica en ${UNIT_LINK_PATH}"
-
-	fi
+	done
 }
 
 loaded_fragment_path() {
+	local service_name="$1"
 
 	systemctl show \
 		--property=FragmentPath \
 		--value \
-		"${SERVICE_NAME}.service" \
+		"${service_name}.service" \
 		2>/dev/null || true
 }
 
 validate_loaded_fragment() {
 
-	case "$1" in
+	local service_name="$1"
+	local unit_source="$2"
+	local unit_link="$3"
+
+	case "$(loaded_fragment_path "${service_name}")" in
 
 		"")
 			;;
 
-		"${UNIT_SOURCE_PATH}")
+		"${unit_source}")
 			;;
 
-		"${UNIT_LINK_PATH}")
+		"${unit_link}")
 			;;
 
 		*)
 			fail \
-				"systemd está utilizando una unidad ${SERVICE_NAME}.service inesperada."
+				"systemd está utilizando una unidad ${service_name}.service inesperada."
 			;;
 
 	esac
@@ -692,18 +794,6 @@ validate_bundle() {
 
 	success "Binario HCR válido"
 
-	if [ -e "${UNIT_SOURCE_PATH}" ] ||
-		[ -L "${UNIT_SOURCE_PATH}" ]; then
-
-		validate_root_file \
-			false \
-			"Unidad systemd existente" \
-			"${UNIT_SOURCE_PATH}"
-
-		success "Unidad systemd válida"
-
-	fi
-
 	if [ "${TRANSPORT}" = "tls" ] ||
 		[ "${TRANSPORT}" = "auto" ]; then
 
@@ -738,8 +828,14 @@ validate_bundle() {
 
 render_unit() {
 
+	local port="$1"
 	local tls_arguments=""
 	local capability_arguments=""
+	local service_name
+	local unit_source
+
+	service_name="$(service_name_for_port "${port}")"
+	unit_source="$(unit_source_path_for_port "${port}")"
 
 	# --------------------------------------------------------
 	# TLS
@@ -756,7 +852,7 @@ render_unit() {
 	# CAPABILITIES
 	# --------------------------------------------------------
 
-	if requires_privileged_port_capability "${PORT}"; then
+	if requires_privileged_port_capability "${port}"; then
 
 		capability_arguments=$(
 			cat <<'EOF'
@@ -782,8 +878,10 @@ EOF
 
 	TEMP_UNIT="$(
 		mktemp \
-			"${SCRIPT_DIR}/.${SERVICE_NAME}.XXXXXX.service"
+			"${SCRIPT_DIR}/.${service_name}.XXXXXX.service"
 	)"
+
+	TEMP_UNITS+=("${TEMP_UNIT}")
 
 	chmod 0600 "${TEMP_UNIT}"
 
@@ -793,7 +891,7 @@ EOF
 
 	cat >"${TEMP_UNIT}" <<EOF
 [Unit]
-Description=HCR relay
+Description=HCR relay on port ${port}
 Documentation=file:${SCRIPT_DIR}/README.md
 
 Wants=network-online.target
@@ -810,7 +908,7 @@ Group=root
 
 WorkingDirectory=${SCRIPT_DIR}
 
-ExecStart=${BINARY_PATH} --listen :${PORT} --target 127.0.0.1:${TARGET_PORT} --transport ${TRANSPORT}${tls_arguments} --max-download-frame ${MAX_DOWNLOAD_FRAME} --download-poll-timeout ${DOWNLOAD_POLL_TIMEOUT}
+ExecStart=${BINARY_PATH} --listen :${port} --target 127.0.0.1:${TARGET_PORT} --transport ${TRANSPORT}${tls_arguments} --max-download-frame ${MAX_DOWNLOAD_FRAME} --download-poll-timeout ${DOWNLOAD_POLL_TIMEOUT}
 
 Restart=on-failure
 RestartSec=5s
@@ -864,7 +962,7 @@ LimitCORE=0
 StandardOutput=journal
 StandardError=journal
 
-SyslogIdentifier=hcr-server
+SyslogIdentifier=${service_name}
 
 [Install]
 WantedBy=multi-user.target
@@ -882,6 +980,7 @@ EOF
 cleanup() {
 
 	local exit_code=$?
+	local temp_unit
 
 	trap - EXIT
 
@@ -890,6 +989,10 @@ cleanup() {
 	if [ -n "${TEMP_UNIT}" ]; then
 		rm -f -- "${TEMP_UNIT}"
 	fi
+
+	for temp_unit in "${TEMP_UNITS[@]}"; do
+		rm -f -- "${temp_unit}"
+	done
 
 	exit "${exit_code}"
 }
@@ -900,14 +1003,19 @@ cleanup() {
 
 show_service_diagnostics() {
 
+	local port="$1"
+	local service_name
+
+	service_name="$(service_name_for_port "${port}")"
+
 	printf "\n"
 
-	detail "Estado del servicio:"
+	detail "Estado del servicio ${service_name}:"
 
 	systemctl status \
 		--no-pager \
 		--full \
-		"${SERVICE_NAME}.service" ||
+		"${service_name}.service" ||
 		true
 
 	printf "\n"
@@ -915,7 +1023,7 @@ show_service_diagnostics() {
 	detail "Últimos registros de HCR Server:"
 
 	journalctl \
-		-u "${SERVICE_NAME}.service" \
+		-u "${service_name}.service" \
 		-n 30 \
 		--no-pager \
 		--output=short-iso ||
@@ -928,8 +1036,12 @@ show_service_diagnostics() {
 
 verify_service_health() {
 
+	local port="$1"
+	local service_name
 	local initial_pid
 	local final_pid
+
+	service_name="$(service_name_for_port "${port}")"
 
 	# --------------------------------------------------------
 	# PID INICIAL
@@ -939,7 +1051,7 @@ verify_service_health() {
 		systemctl show \
 			--property=MainPID \
 			--value \
-			"${SERVICE_NAME}.service"
+			"${service_name}.service"
 	)"
 
 	[[ "${initial_pid}" =~ ^[1-9][0-9]*$ ]] ||
@@ -956,7 +1068,7 @@ verify_service_health() {
 	# --------------------------------------------------------
 
 	systemctl is-active --quiet \
-		"${SERVICE_NAME}.service" ||
+		"${service_name}.service" ||
 		return 1
 
 	# --------------------------------------------------------
@@ -967,7 +1079,7 @@ verify_service_health() {
 		systemctl show \
 			--property=MainPID \
 			--value \
-			"${SERVICE_NAME}.service"
+			"${service_name}.service"
 	)"
 
 	[[ "${final_pid}" =~ ^[1-9][0-9]*$ ]] ||
@@ -981,7 +1093,7 @@ verify_service_health() {
 	# LISTENER
 	# --------------------------------------------------------
 
-	check_hcr_listener "${PORT}" ||
+	check_hcr_listener "${port}" ||
 		return 1
 
 	return 0
@@ -993,12 +1105,27 @@ verify_service_health() {
 
 install_service() {
 
+	local port
+	local service_name
+	local unit_source
+	local unit_link
+
 	section "Preparando instalación"
 
 	validate_unit_link
 
-	validate_loaded_fragment \
-		"$(loaded_fragment_path)"
+	for port in "${PORTS[@]}"; do
+
+		service_name="$(service_name_for_port "${port}")"
+		unit_source="$(unit_source_path_for_port "${port}")"
+		unit_link="$(unit_link_path_for_port "${port}")"
+
+		validate_loaded_fragment \
+			"${service_name}" \
+			"${unit_source}" \
+			"${unit_link}"
+
+	done
 
 	success "No existen conflictos con systemd"
 
@@ -1006,63 +1133,12 @@ install_service() {
 	# GENERAR SYSTEMD
 	# --------------------------------------------------------
 
-	spinner_start \
-		"Generando configuración de systemd..."
-
-	if render_unit >/dev/null 2>&1; then
-
-		spinner_stop ok
-
-	else
-
-		spinner_stop fail
-
-		fail \
-			"No se pudo generar la unidad systemd."
-
-	fi
-
-	# --------------------------------------------------------
-	# INSTALAR SYSTEMD
-	# --------------------------------------------------------
-
-	spinner_start \
-		"Instalando unidad HCR Server..."
-
-	if mv -f \
-		-- "${TEMP_UNIT}" \
-		"${UNIT_SOURCE_PATH}"; then
-
-		TEMP_UNIT=""
-
-		spinner_stop ok
-
-	else
-
-		spinner_stop fail
-
-		fail \
-			"No se pudo instalar la unidad systemd."
-
-	fi
-
-	# --------------------------------------------------------
-	# ENLACE
-	# --------------------------------------------------------
-
-	if [ -L "${UNIT_LINK_PATH}" ]; then
-
-		success \
-			"Enlace systemd existente y verificado"
-
-	else
+	for port in "${PORTS[@]}"; do
 
 		spinner_start \
-			"Creando enlace de systemd..."
+			"Generando configuración de systemd para puerto ${port}..."
 
-		if ln -s \
-			-- "${UNIT_SOURCE_PATH}" \
-			"${UNIT_LINK_PATH}"; then
+		if render_unit "${port}" >/dev/null 2>&1; then
 
 			spinner_stop ok
 
@@ -1071,16 +1147,105 @@ install_service() {
 			spinner_stop fail
 
 			fail \
-				"No se pudo crear el enlace systemd."
+				"No se pudo generar la unidad systemd para el puerto ${port}."
 
 		fi
-	fi
+
+	done
+
+	# --------------------------------------------------------
+	# INSTALAR SYSTEMD
+	# --------------------------------------------------------
+
+	for port in "${PORTS[@]}"; do
+
+		service_name="$(service_name_for_port "${port}")"
+		unit_source="$(unit_source_path_for_port "${port}")"
+
+		# Buscar el temporal correspondiente.
+		TEMP_UNIT=""
+
+		for candidate in "${TEMP_UNITS[@]}"; do
+
+			if grep -q \
+				"Description=HCR relay on port ${port}" \
+				"${candidate}" 2>/dev/null; then
+
+				TEMP_UNIT="${candidate}"
+				break
+
+			fi
+
+		done
+
+		[ -n "${TEMP_UNIT}" ] ||
+			fail \
+				"No se encontró la unidad temporal del puerto ${port}."
+
+		spinner_start \
+			"Instalando unidad HCR Server para puerto ${port}..."
+
+		if mv -f \
+			-- "${TEMP_UNIT}" \
+			"${unit_source}"; then
+
+			TEMP_UNIT=""
+
+			spinner_stop ok
+
+		else
+
+			spinner_stop fail
+
+			fail \
+				"No se pudo instalar la unidad systemd para el puerto ${port}."
+
+		fi
+
+	done
+
+	# --------------------------------------------------------
+	# ENLACES
+	# --------------------------------------------------------
+
+	for port in "${PORTS[@]}"; do
+
+		unit_source="$(unit_source_path_for_port "${port}")"
+		unit_link="$(unit_link_path_for_port "${port}")"
+
+		if [ -L "${unit_link}" ]; then
+
+			success \
+				"Enlace systemd existente y verificado para puerto ${port}"
+
+		else
+
+			spinner_start \
+				"Creando enlace de systemd para puerto ${port}..."
+
+			if ln -s \
+				-- "${unit_source}" \
+				"${unit_link}"; then
+
+				spinner_stop ok
+
+			else
+
+				spinner_stop fail
+
+				fail \
+					"No se pudo crear el enlace systemd para puerto ${port}."
+
+			fi
+		fi
+
+	done
 
 	# --------------------------------------------------------
 	# CONFIGURAR SYSTEMD
 	# --------------------------------------------------------
 
-	section "Configurando servicio"
+	section "Configurando servicios"
 
 	spinner_start \
 		"Recargando configuración de systemd..."
@@ -1102,156 +1267,192 @@ install_service() {
 	# ENABLE
 	# --------------------------------------------------------
 
-	spinner_start \
-		"Habilitando inicio automático..."
+	for port in "${PORTS[@]}"; do
 
-	if systemctl enable \
-		"${SERVICE_NAME}.service" >/dev/null 2>&1; then
+		service_name="$(service_name_for_port "${port}")"
 
-		spinner_stop ok
+		spinner_start \
+			"Habilitando inicio automático para puerto ${port}..."
 
-	else
+		if systemctl enable \
+			"${service_name}.service" >/dev/null 2>&1; then
 
-		spinner_stop fail
+			spinner_stop ok
 
-		fail \
-			"No se pudo habilitar el servicio."
+		else
 
-	fi
+			spinner_stop fail
 
-	systemctl reset-failed \
-		"${SERVICE_NAME}.service" >/dev/null 2>&1 ||
-		true
+			fail \
+				"No se pudo habilitar el servicio del puerto ${port}."
+
+		fi
+
+		systemctl reset-failed \
+			"${service_name}.service" >/dev/null 2>&1 ||
+			true
+
+	done
 
 	# --------------------------------------------------------
-	# COMPROBAR PUERTO
+	# COMPROBAR PUERTOS
 	# --------------------------------------------------------
 
-	spinner_start \
-		"Comprobando disponibilidad del puerto HCR..."
+	for port in "${PORTS[@]}"; do
 
-	if check_port_available "${PORT}"; then
+		spinner_start \
+			"Comprobando disponibilidad del puerto HCR ${port}..."
 
-		spinner_stop ok
+		if check_port_available "${port}"; then
 
-	else
+			spinner_stop ok
 
-		spinner_stop fail
+		else
 
-		fail \
-			"El puerto HCR ${PORT} está siendo utilizado por otro servicio."
+			spinner_stop fail
 
-	fi
+			fail \
+				"El puerto HCR ${port} está siendo utilizado por otro servicio."
+
+		fi
+
+	done
 
 	# --------------------------------------------------------
 	# REINICIAR HCR
 	# --------------------------------------------------------
 
-	spinner_start \
-		"Iniciando HCR Server..."
+	for port in "${PORTS[@]}"; do
 
-	if systemctl restart \
-		"${SERVICE_NAME}.service" >/dev/null 2>&1; then
+		service_name="$(service_name_for_port "${port}")"
 
-		spinner_stop ok
+		spinner_start \
+			"Iniciando HCR Server en puerto ${port}..."
 
-	else
+		if systemctl restart \
+			"${service_name}.service" >/dev/null 2>&1; then
 
-		spinner_stop fail
+			spinner_stop ok
 
-		printf "\n"
+		else
 
-		show_service_diagnostics
+			spinner_stop fail
 
-		printf "\n"
+			printf "\n"
 
-		fail \
-			"HCR Server no pudo iniciarse."
+			show_service_diagnostics "${port}"
 
-	fi
+			printf "\n"
+
+			fail \
+				"HCR Server no pudo iniciarse en el puerto ${port}."
+
+		fi
+
+	done
 
 	# --------------------------------------------------------
 	# ESTADO
 	# --------------------------------------------------------
 
-	if systemctl is-active --quiet \
-		"${SERVICE_NAME}.service"; then
+	for port in "${PORTS[@]}"; do
 
-		success \
-			"HCR Server está activo"
+		service_name="$(service_name_for_port "${port}")"
 
-	else
+		if systemctl is-active --quiet \
+			"${service_name}.service"; then
 
-		fail \
-			"HCR Server no quedó activo."
+			success \
+				"HCR Server está activo en el puerto ${port}"
 
-	fi
+		else
+
+			fail \
+				"HCR Server no quedó activo en el puerto ${port}."
+
+		fi
+
+	done
 
 	# --------------------------------------------------------
 	# WORKING DIRECTORY
 	# --------------------------------------------------------
 
-	if [ "$(
-		systemctl show \
-			--property=WorkingDirectory \
-			--value \
-			"${SERVICE_NAME}.service"
-	)" = "${SCRIPT_DIR}" ]; then
+	for port in "${PORTS[@]}"; do
 
-		success \
-			"Directorio de trabajo verificado"
+		service_name="$(service_name_for_port "${port}")"
 
-	else
+		if [ "$(
+			systemctl show \
+				--property=WorkingDirectory \
+				--value \
+				"${service_name}.service"
+		)" = "${SCRIPT_DIR}" ]; then
 
-		fail \
-			"systemd reportó un directorio de trabajo inesperado."
+			success \
+				"Directorio de trabajo verificado para puerto ${port}"
 
-	fi
+		else
+
+			fail \
+				"systemd reportó un directorio de trabajo inesperado para puerto ${port}."
+
+		fi
+
+	done
 
 	# --------------------------------------------------------
 	# ESTABILIDAD
 	# --------------------------------------------------------
 
-	spinner_start \
-		"Realizando comprobación de estabilidad..."
+	for port in "${PORTS[@]}"; do
 
-	if verify_service_health >/dev/null 2>&1; then
+		spinner_start \
+			"Realizando comprobación de estabilidad en puerto ${port}..."
 
-		spinner_stop ok
+		if verify_service_health "${port}" >/dev/null 2>&1; then
 
-	else
+			spinner_stop ok
 
-		spinner_stop fail
+		else
 
-		printf "\n"
+			spinner_stop fail
 
-		error_message \
-			"La comprobación de estabilidad falló."
+			printf "\n"
 
-		show_service_diagnostics
+			error_message \
+				"La comprobación de estabilidad del puerto ${port} falló."
 
-		printf "\n"
+			show_service_diagnostics "${port}"
 
-		fail \
-			"La instalación terminó con errores."
+			printf "\n"
 
-	fi
+			fail \
+				"La instalación terminó con errores."
+
+		fi
+
+	done
 
 	# --------------------------------------------------------
 	# COMPROBACIÓN FINAL
 	# --------------------------------------------------------
 
-	if check_hcr_listener "${PORT}"; then
+	for port in "${PORTS[@]}"; do
 
-		success \
-			"HCR Server está escuchando correctamente en el puerto ${PORT}"
+		if check_hcr_listener "${port}"; then
 
-	else
+			success \
+				"HCR Server está escuchando correctamente en el puerto ${port}"
 
-		fail \
-			"HCR Server está activo, pero no se detectó escucha en el puerto ${PORT}."
+		else
 
-	fi
+			fail \
+				"HCR Server está activo, pero no se detectó escucha en el puerto ${port}."
+
+		fi
+
+	done
 }
 
 # ------------------------------------------------------------
@@ -1259,6 +1460,9 @@ install_service() {
 # ------------------------------------------------------------
 
 show_summary() {
+
+	local port
+	local service_name
 
 	clear_screen
 
@@ -1277,12 +1481,17 @@ show_summary() {
 	printf "${BOLD}${WHITE}Configuración:${RESET}\n\n"
 
 	printf \
-		"  ${CYAN}${ICON_ARROW}${RESET} Servicio       : ${BRIGHT_WHITE}%s${RESET}\n" \
-		"${SERVICE_NAME}"
+		"  ${CYAN}${ICON_ARROW}${RESET} Servicios      : ${BRIGHT_WHITE}%s${RESET}\n" \
+		"${#PORTS[@]}"
 
 	printf \
-		"  ${CYAN}${ICON_ARROW}${RESET} Puerto         : ${BRIGHT_WHITE}%s${RESET}\n" \
-		"${PORT}"
+		"  ${CYAN}${ICON_ARROW}${RESET} Puertos HCR    : ${BRIGHT_WHITE}"
+
+	for port in "${PORTS[@]}"; do
+		printf "%s " "${port}"
+	done
+
+	printf "${RESET}\n"
 
 	printf \
 		"  ${CYAN}${ICON_ARROW}${RESET} Puerto destino : ${BRIGHT_WHITE}%s${RESET}\n" \
@@ -1315,17 +1524,42 @@ show_summary() {
 	printf \
 		"  ${CYAN}${ICON_ARROW}${RESET} Prioridad      : ${BRIGHT_WHITE}Nice -5${RESET}\n"
 
-	if requires_privileged_port_capability "${PORT}"; then
+	printf "\n"
+
+	printf "${BOLD}${WHITE}Instancias:${RESET}\n\n"
+
+	for port in "${PORTS[@]}"; do
+
+		service_name="$(service_name_for_port "${port}")"
 
 		printf \
-			"  ${CYAN}${ICON_ARROW}${RESET} Capacidad puerto: ${BRIGHT_WHITE}CAP_NET_BIND_SERVICE${RESET}\n"
+			"  ${CYAN}${ICON_ARROW}${RESET} Puerto ${BRIGHT_WHITE}%s${RESET} → ${BRIGHT_WHITE}%s${RESET}\n" \
+			"${port}" \
+			"${service_name}.service"
 
-	else
+	done
 
-		printf \
-			"  ${CYAN}${ICON_ARROW}${RESET} Capacidad puerto: ${BRIGHT_WHITE}No requerida${RESET}\n"
+	printf "\n"
 
-	fi
+	printf "${BOLD}${WHITE}Capacidades:${RESET}\n\n"
+
+	for port in "${PORTS[@]}"; do
+
+		if requires_privileged_port_capability "${port}"; then
+
+			printf \
+				"  ${CYAN}${ICON_ARROW}${RESET} Puerto ${BRIGHT_WHITE}%s${RESET}: ${BRIGHT_WHITE}CAP_NET_BIND_SERVICE${RESET}\n" \
+				"${port}"
+
+		else
+
+			printf \
+				"  ${CYAN}${ICON_ARROW}${RESET} Puerto ${BRIGHT_WHITE}%s${RESET}: ${BRIGHT_WHITE}No requerida${RESET}\n" \
+				"${port}"
+
+		fi
+
+	done
 
 	printf "\n"
 
@@ -1335,9 +1569,13 @@ show_summary() {
 		"  ${DIM}Binario :${RESET} %s\n" \
 		"${BINARY_PATH}"
 
-	printf \
-		"  ${DIM}Unidad  :${RESET} %s\n" \
-		"${UNIT_SOURCE_PATH}"
+	for port in "${PORTS[@]}"; do
+
+		printf \
+			"  ${DIM}Unidad  :${RESET} %s\n" \
+			"$(unit_source_path_for_port "${port}")"
+
+	done
 
 	printf "\n"
 
@@ -1347,7 +1585,7 @@ show_summary() {
 		"HCR Server está ejecutándose correctamente.${RESET}\n"
 
 	printf \
-		"${DIM}El servicio se iniciará automáticamente con el sistema.${RESET}\n"
+		"${DIM}Todas las instancias se iniciarán automáticamente con el sistema.${RESET}\n"
 
 	printf "\n"
 }
