@@ -6,23 +6,26 @@ set -euo pipefail
 # Compatible con el instalador HCR Server actual
 #
 # Elimina:
-#   - Todas las instancias hcr-server-<puerto>.service
-#   - Enlaces de systemd correspondientes
-#   - Unidades systemd instaladas
-#   - Drop-ins relacionados
+#   - Todas las instancias hcr-server-*.service
+#   - Enlaces/unidades systemd correspondientes
+#   - Drop-ins de systemd
 #   - Binario hcr-server
 #   - fullchain.pem
 #   - privkey.pem
-#   - Archivos temporales del instalador
-#   - El propio desinstalador
+#   - Archivos temporales de systemd
+#   - Este propio desinstalador
 #
-# NO elimina el directorio del panel.
+# NO elimina el directorio completo del panel.
 # ============================================================
 
 PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 LC_ALL="C"
 LANG="C"
 export PATH LC_ALL LANG
+
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
 
 SERVICE_PREFIX="hcr-server"
 SYSTEMD_DIR="/etc/systemd/system"
@@ -32,7 +35,7 @@ SYSTEMD_DIR="/etc/systemd/system"
 # ============================================================
 
 command -v readlink >/dev/null 2>&1 || {
-	echo "Error: readlink no está instalado." >&2
+	printf '%s\n' "Error: readlink no está instalado." >&2
 	exit 1
 }
 
@@ -48,14 +51,14 @@ BINARY_PATH=""
 TLS_CERT_PATH=""
 TLS_KEY_PATH=""
 
-# ============================================================
-# ARRAYS DE INSTANCIAS
-# ============================================================
+# Lista de servicios encontrados.
+SERVICES=()
 
-SERVICE_NAMES=()
-UNIT_SOURCE_PATHS=()
-UNIT_LINK_PATHS=()
-INSTALL_DIRS=()
+# Lista de unidades fuente.
+UNIT_SOURCES=()
+
+# Lista de enlaces systemd.
+UNIT_LINKS=()
 
 # ============================================================
 # COLORES
@@ -70,6 +73,7 @@ GREEN="\033[32m"
 YELLOW="\033[33m"
 BLUE="\033[34m"
 CYAN="\033[36m"
+WHITE="\033[37m"
 
 BRIGHT_BLUE="\033[94m"
 BRIGHT_CYAN="\033[96m"
@@ -88,7 +92,59 @@ WARN="!"
 DIAMOND="◆"
 
 # ============================================================
-# UTILIDADES VISUALES
+# SPINNER
+# ============================================================
+
+SPINNER_PID=""
+
+spinner_start() {
+	local message="$1"
+
+	(
+		local frames=(
+			"⠋"
+			"⠙"
+			"⠹"
+			"⠸"
+			"⠼"
+			"⠴"
+			"⠦"
+			"⠧"
+			"⠇"
+			"⠏"
+		)
+
+		local i=0
+
+		while true; do
+			printf '\r%b' \
+				"${BRIGHT_CYAN}${frames[$i]}${RESET} ${message}"
+
+			i=$(( (i + 1) % ${#frames[@]} ))
+
+			sleep 0.08
+		done
+	) &
+
+	SPINNER_PID=$!
+}
+
+spinner_stop() {
+
+	if [[ -n "${SPINNER_PID}" ]]; then
+
+		kill "${SPINNER_PID}" >/dev/null 2>&1 || true
+
+		wait "${SPINNER_PID}" 2>/dev/null || true
+
+		SPINNER_PID=""
+
+		printf '\r\033[K'
+	fi
+}
+
+# ============================================================
+# SALIDA
 # ============================================================
 
 clear_screen() {
@@ -101,6 +157,7 @@ line() {
 }
 
 header() {
+
 	clear_screen
 
 	printf '\n'
@@ -121,6 +178,7 @@ header() {
 }
 
 section() {
+
 	printf '\n%b\n' \
 		"${BRIGHT_BLUE}${BOLD}${DIAMOND} $1${RESET}"
 
@@ -153,59 +211,6 @@ detail() {
 }
 
 # ============================================================
-# SPINNER
-# ============================================================
-
-SPINNER_PID=""
-
-spinner_start() {
-	local message="$1"
-
-	(
-		local frames=(
-			"⠋"
-			"⠙"
-			"⠹"
-			"⠸"
-			"⠼"
-			"⠴"
-			"⠦"
-			"⠧"
-			"⠇"
-			"⠏"
-		)
-
-		local i=0
-
-		while true; do
-
-			printf '\r%b' \
-				"${BRIGHT_CYAN}${frames[$i]}${RESET} ${message}"
-
-			i=$(( (i + 1) % ${#frames[@]} ))
-
-			sleep 0.08
-		done
-	) &
-
-	SPINNER_PID=$!
-}
-
-spinner_stop() {
-
-	if [[ -n "${SPINNER_PID}" ]]; then
-
-		kill "${SPINNER_PID}" 2>/dev/null || true
-
-		wait "${SPINNER_PID}" 2>/dev/null || true
-
-		SPINNER_PID=""
-
-		printf '\r\033[K'
-	fi
-}
-
-# ============================================================
 # ERROR
 # ============================================================
 
@@ -221,55 +226,88 @@ fail() {
 }
 
 # ============================================================
-# COMANDOS REQUERIDOS
+# COMPROBACIÓN DE COMANDOS
 # ============================================================
 
 require_command() {
 
-	command -v "$1" >/dev/null 2>&1 ||
-		fail "No se encontró el comando requerido: $1"
+	local command_name="$1"
+
+	command -v "${command_name}" >/dev/null 2>&1 ||
+		fail \
+			"No se encontró el comando requerido: ${command_name}"
 }
+
+# ============================================================
+# ENTORNO
+# ============================================================
 
 require_environment() {
 
-	[[ "${EUID}" -eq 0 ]] ||
+	if [[ "${EUID}" -ne 0 ]]; then
 		fail "Este desinstalador debe ejecutarse como root."
+	fi
 
-	[[ "$(uname -s)" == "Linux" ]] ||
-		fail "Este desinstalador solo funciona en Linux."
+	if [[ "$(uname -s)" != "Linux" ]]; then
+		fail "Este desinstalador solamente funciona en Linux."
+	fi
 
-	require_command systemctl
-	require_command systemd-analyze
-	require_command flock
-	require_command readlink
-	require_command stat
-	require_command rm
-	require_command sleep
-	require_command grep
-	require_command sed
-	require_command tail
-	require_command dirname
-	require_command basename
-	require_command find
-	require_command ps
+	for command_name in \
+		systemctl \
+		systemd-analyze \
+		flock \
+		readlink \
+		stat \
+		rm \
+		sleep \
+		grep \
+		sed \
+		awk \
+		tail \
+		head \
+		find \
+		sort \
+		basename \
+		dirname
+	do
+		require_command "${command_name}"
+	done
+
+	if [[ ! -d "${SYSTEMD_DIR}" ]]; then
+		fail "No existe el directorio de systemd: ${SYSTEMD_DIR}"
+	fi
 }
 
 # ============================================================
 # BLOQUEO
-#
-# El instalador utiliza /etc/systemd/system como objeto
-# bloqueado mediante flock. Usamos el mismo mecanismo.
 # ============================================================
+
+LOCK_FD_OPEN="false"
 
 acquire_uninstall_lock() {
 
-	exec 9<"${SYSTEMD_DIR}" ||
-		fail \
-			"No se pudo abrir ${SYSTEMD_DIR} para bloqueo."
+	local lock_file="${SYSTEMD_DIR}/.${SERVICE_PREFIX}.uninstall.lock"
 
-	flock -n 9 ||
+	exec 9>"${lock_file}"
+
+	if ! flock -n 9; then
 		fail \
-			"Ya existe otra operación de instalación/desinstalación en curso."
+			"Ya existe otra operación de instalación/desinstalación de HCR Server en curso."
+	fi
+
+	LOCK_FD_OPEN="true"
+}
+
+release_uninstall_lock() {
+
+	if [[ "${LOCK_FD_OPEN}" == "true" ]]; then
+
+		flock -u 9 >/dev/null 2>&1 || true
+
+		exec 9>&-
+
+		LOCK_FD_OPEN="false"
+	fi
 }
 
 # ============================================================
@@ -281,358 +319,319 @@ normalize_path() {
 	local path="$1"
 
 	if [[ -e "${path}" || -L "${path}" ]]; then
-
 		readlink -f -- "${path}"
-
 	else
-
 		printf '%s' "${path}"
-
 	fi
 }
 
 # ============================================================
-# OBTENER FRAGMENT PATH DE SYSTEMD
+# DETECTAR INSTALACIÓN DESDE UNA UNIDAD
 # ============================================================
 
-loaded_fragment_path() {
+extract_working_directory() {
 
-	local service_name="$1"
+	local unit="$1"
+	local working_directory
 
-	systemctl show \
-		--property=FragmentPath \
-		--value \
-		"${service_name}.service" \
-		2>/dev/null || true
+	working_directory="$(
+		grep -E '^WorkingDirectory=' \
+			"${unit}" \
+			2>/dev/null |
+			tail -n1 |
+			sed 's/^WorkingDirectory=//' ||
+			true
+	)"
+
+	printf '%s' "${working_directory}"
 }
 
 # ============================================================
-# DETECTAR SI UNA UNIDAD ES REALMENTE DE HCR
+# DETECTAR TODOS LOS SERVICIOS
 # ============================================================
 
-is_hcr_unit() {
-
-	local unit_file="$1"
-
-	[[ -f "${unit_file}" ]] || return 1
-
-	# Debe contener el patrón de descripción creado
-	# por el instalador actual.
-	grep -qE '^Description=HCR relay on port [0-9]+$' \
-		"${unit_file}" ||
-		return 1
-
-	# Debe ejecutar nuestro binario hcr-server.
-	grep -qE '^ExecStart=.*\/hcr-server([[:space:]]|$)' \
-		"${unit_file}" ||
-		return 1
-
-	return 0
-}
-
-# ============================================================
-# DETECTAR DIRECTORIO DE INSTALACIÓN DESDE UNIDAD
-# ============================================================
-
-get_unit_working_directory() {
-
-	local unit_file="$1"
-
-	grep -E '^WorkingDirectory=' \
-		"${unit_file}" \
-		2>/dev/null |
-		tail -n1 |
-		sed 's/^WorkingDirectory=//' ||
-		true
-}
-
-# ============================================================
-# REGISTRAR INSTANCIA
-# ============================================================
-
-register_instance() {
-
-	local service_name="$1"
-	local unit_source="$2"
-	local unit_link="$3"
-
-	local existing
-
-	for existing in "${SERVICE_NAMES[@]}"; do
-
-		if [[ "${existing}" == "${service_name}" ]]; then
-			return 0
-		fi
-
-	done
-
-	SERVICE_NAMES+=("${service_name}")
-	UNIT_SOURCE_PATHS+=("${unit_source}")
-	UNIT_LINK_PATHS+=("${unit_link}")
-
-	detail \
-		"Instancia detectada: ${service_name}.service"
-
-	detail \
-		"Unidad: ${unit_source}"
-}
-
-# ============================================================
-# DESCUBRIR TODAS LAS INSTANCIAS
-# ============================================================
-
-discover_instances() {
-
-	section "BUSCANDO INSTALACIÓN DE HCR SERVER"
+discover_services() {
 
 	local file
 	local service_name
-	local port
-	local source
-	local link
-	local working_directory
+	local found=0
+
+	SERVICES=()
+	UNIT_SOURCES=()
+	UNIT_LINKS=()
 
 	# --------------------------------------------------------
-	# 1. Buscar unidades hcr-server-*.service dentro de
-	#    /etc/systemd/system
+	# Buscar unidades directamente en /etc/systemd/system
 	# --------------------------------------------------------
 
-	shopt -s nullglob
+	while IFS= read -r -d '' file; do
 
-	for file in \
-		"${SYSTEMD_DIR}/${SERVICE_PREFIX}-"*.service
-	do
+		service_name="$(basename -- "${file}")"
 
-		[[ -f "${file}" || -L "${file}" ]] || continue
+		if [[ "${service_name}" =~ ^${SERVICE_PREFIX}-[0-9]+\.service$ ]]; then
 
-		source="$(normalize_path "${file}")"
+			SERVICES+=("${service_name}")
+			UNIT_LINKS+=("${file}")
 
-		[[ -f "${source}" ]] || continue
+			found=1
 
-		is_hcr_unit "${source}" || continue
-
-		service_name="$(basename -- "${file}" .service)"
-
-		# Debe seguir el formato hcr-server-PORT.
-		if [[ "${service_name}" =~ ^${SERVICE_PREFIX}-([0-9]+)$ ]]; then
-
-			port="${BASH_REMATCH[1]}"
-
-			link="${file}"
-
-			register_instance \
-				"${service_name}" \
-				"${source}" \
-				"${link}"
-
+			# Resolver enlace si corresponde.
+			if [[ -L "${file}" ]]; then
+				UNIT_SOURCES+=("$(normalize_path "${file}")")
+			else
+				UNIT_SOURCES+=("${file}")
+			fi
 		fi
 
-	done
+	done < <(
+		find "${SYSTEMD_DIR}" \
+			-maxdepth 1 \
+			-type f \
+			-name "${SERVICE_PREFIX}-*.service" \
+			-print0 \
+			2>/dev/null
+	)
+
+	while IFS= read -r -d '' file; do
+
+		service_name="$(basename -- "${file}")"
+
+		if [[ "${service_name}" =~ ^${SERVICE_PREFIX}-[0-9]+\.service$ ]]; then
+
+			# Evitar duplicados.
+			if [[ ! " ${SERVICES[*]} " =~ " ${service_name} " ]]; then
+
+				SERVICES+=("${service_name}")
+				UNIT_LINKS+=("${file}")
+				UNIT_SOURCES+=("$(normalize_path "${file}")")
+
+				found=1
+			fi
+		fi
+
+	done < <(
+		find "${SYSTEMD_DIR}" \
+			-maxdepth 1 \
+			-type l \
+			-name "${SERVICE_PREFIX}-*.service" \
+			-print0 \
+			2>/dev/null
+	)
 
 	# --------------------------------------------------------
-	# 2. Buscar unidades que systemd tenga cargadas.
+	# Buscar servicios conocidos por systemd.
 	# --------------------------------------------------------
 
 	while IFS= read -r service_name; do
 
 		[[ -n "${service_name}" ]] || continue
 
-		if [[ "${service_name}" =~ ^${SERVICE_PREFIX}-([0-9]+)$ ]]; then
+		if [[ "${service_name}" =~ ^${SERVICE_PREFIX}-[0-9]+\.service$ ]]; then
 
-			source="$(loaded_fragment_path "${service_name}")"
+			local duplicate="false"
 
-			[[ -n "${source}" ]] || continue
-			[[ -f "${source}" ]] || continue
+			for existing in "${SERVICES[@]}"; do
 
-			is_hcr_unit "${source}" || continue
+				if [[ "${existing}" == "${service_name}" ]]; then
+					duplicate="true"
+					break
+				fi
 
-			link="${SYSTEMD_DIR}/${service_name}.service"
+			done
 
-			register_instance \
-				"${service_name}" \
-				"$(normalize_path "${source}")" \
-				"${link}"
+			if [[ "${duplicate}" == "false" ]]; then
 
+				local fragment
+
+				fragment="$(
+					systemctl show \
+						--property=FragmentPath \
+						--value \
+						"${service_name}" \
+						2>/dev/null ||
+						true
+				)"
+
+				if [[ -n "${fragment}" ]]; then
+
+					SERVICES+=("${service_name}")
+					UNIT_LINKS+=("${SYSTEMD_DIR}/${service_name}")
+					UNIT_SOURCES+=("${fragment}")
+
+					found=1
+				fi
+			fi
 		fi
 
 	done < <(
 		systemctl list-unit-files \
+			--type=service \
 			--no-legend \
 			--no-pager \
-			"${SERVICE_PREFIX}-*.service" \
 			2>/dev/null |
-			awk '{print $1}' |
-			sed 's/\.service$//' |
-			grep -E "^${SERVICE_PREFIX}-[0-9]+$" ||
-			true
+			awk '{print $1}'
 	)
 
 	# --------------------------------------------------------
-	# 3. También comprobar una posible unidad legacy:
-	#
-	#    hcr-server.service
-	#
-	# Esto permite limpiar instalaciones antiguas.
+	# Ordenar resultados.
 	# --------------------------------------------------------
 
-	source="${SYSTEMD_DIR}/${SERVICE_PREFIX}.service"
+	if [[ "${#SERVICES[@]}" -gt 1 ]]; then
 
-	if [[ -f "${source}" ]] &&
-		is_hcr_unit "${source}"; then
+		local sorted_services=()
 
-		link="${source}"
+		while IFS= read -r service_name; do
+			sorted_services+=("${service_name}")
+		done < <(
+			printf '%s\n' "${SERVICES[@]}" |
+				sort -V
+		)
 
-		register_instance \
-			"${SERVICE_PREFIX}" \
-			"$(normalize_path "${source}")" \
-			"${link}"
-
+		SERVICES=("${sorted_services[@]}")
 	fi
 
-	# --------------------------------------------------------
-	# 4. Determinar directorio de instalación.
-	# --------------------------------------------------------
+	return "${found}"
+}
 
-	for source in "${UNIT_SOURCE_PATHS[@]}"; do
+# ============================================================
+# DESCUBRIR DIRECTORIO DE INSTALACIÓN
+# ============================================================
 
-		working_directory="$(get_unit_working_directory "${source}")"
+discover_installation_directory() {
+
+	local service
+	local source
+	local working_directory
+	local candidate
+	local found_directory=""
+
+	for service in "${SERVICES[@]}"; do
+
+		source=""
+
+		for index in "${!SERVICES[@]}"; do
+
+			if [[ "${SERVICES[$index]}" == "${service}" ]]; then
+				source="${UNIT_SOURCES[$index]}"
+				break
+			fi
+
+		done
+
+		[[ -f "${source}" ]] || continue
+
+		working_directory="$(
+			extract_working_directory "${source}"
+		)"
 
 		if [[ -n "${working_directory}" &&
 			  -d "${working_directory}" ]]; then
 
-			working_directory="$(normalize_path "${working_directory}")"
+			candidate="$(normalize_path "${working_directory}")"
 
-			INSTALL_DIRS+=("${working_directory}")
+			if [[ -z "${found_directory}" ]]; then
 
-		else
+				found_directory="${candidate}"
 
-			INSTALL_DIRS+=(
-				"$(dirname -- "${source}")"
-			)
+			elif [[ "${candidate}" != "${found_directory}" ]]; then
 
+				fail \
+					"Las instancias de HCR Server utilizan directorios de instalación diferentes:
+
+${found_directory}
+
+${candidate}"
+
+			fi
 		fi
 
 	done
 
 	# --------------------------------------------------------
-	# 5. Si no se encontró ninguna unidad, comprobar el
-	#    directorio desde el que se ejecuta el desinstalador.
+	# Si no se obtuvo WorkingDirectory, utilizar las unidades.
 	# --------------------------------------------------------
 
-	if [[ "${#SERVICE_NAMES[@]}" -eq 0 ]]; then
+	if [[ -z "${found_directory}" ]]; then
 
-		if [[ -f "${SCRIPT_DIR}/hcr-server" ]]; then
+		for source in "${UNIT_SOURCES[@]}"; do
 
-			INSTALL_DIR="${SCRIPT_DIR}"
+			if [[ -f "${source}" ]]; then
 
-			info \
-				"No se encontraron unidades activas, pero se detectó el binario HCR en el directorio actual."
+				candidate="$(dirname -- "${source}")"
 
-		else
+				if [[ -z "${found_directory}" ]]; then
 
-			fail \
-				"No se encontró ninguna unidad HCR Server instalada ni un binario hcr-server en el directorio del desinstalador."
+					found_directory="$(normalize_path "${candidate}")"
 
-		fi
+				elif [[ "${candidate}" != "${found_directory}" ]]; then
 
-	else
+					fail \
+						"No se pudo determinar un único directorio de instalación."
 
-		INSTALL_DIR="${INSTALL_DIRS[0]}"
+				fi
+			fi
+
+		done
 	fi
 
-	# --------------------------------------------------------
-	# 6. Normalizar instalación.
-	# --------------------------------------------------------
+	[[ -n "${found_directory}" ]] ||
+		fail \
+			"No se pudo determinar el directorio de instalación de HCR Server."
 
-	INSTALL_DIR="$(normalize_path "${INSTALL_DIR}")"
+	INSTALL_DIR="${found_directory}"
 
 	BINARY_PATH="${INSTALL_DIR}/hcr-server"
 	TLS_CERT_PATH="${INSTALL_DIR}/fullchain.pem"
 	TLS_KEY_PATH="${INSTALL_DIR}/privkey.pem"
+}
 
-	printf '\n'
+# ============================================================
+# VALIDAR UNIDAD
+# ============================================================
 
-	if [[ "${#SERVICE_NAMES[@]}" -gt 0 ]]; then
+validate_unit() {
 
-		success \
-			"Se detectaron ${#SERVICE_NAMES[@]} instancia(s) de HCR Server."
+	local service="$1"
+	local source="$2"
+	local expected_binary
 
-		printf '\n'
+	expected_binary="${BINARY_PATH}"
 
-		for service_name in "${SERVICE_NAMES[@]}"; do
+	[[ -f "${source}" ]] ||
+		fail \
+			"La unidad ${service} no existe:
 
-			detail \
-				"${service_name}.service"
+${source}"
 
-		done
+	# --------------------------------------------------------
+	# Debe pertenecer a HCR.
+	# --------------------------------------------------------
 
-	else
+	if ! grep -qE '^Description=HCR relay on port [0-9]+$' "${source}"; then
 
-		info "No hay unidades systemd activas para eliminar."
+		fail \
+			"La unidad ${service} no coincide con el formato del instalador HCR actual:
+
+${source}"
 	fi
 
-	printf '\n'
+	# --------------------------------------------------------
+	# Debe utilizar nuestro binario.
+	# --------------------------------------------------------
 
-	detail "Directorio de instalación: ${INSTALL_DIR}"
-	detail "Binario: ${BINARY_PATH}"
-	detail "Certificado: ${TLS_CERT_PATH}"
-	detail "Clave privada: ${TLS_KEY_PATH}"
-}
+	if ! grep -qF \
+		"ExecStart=${expected_binary}" \
+		"${source}"; then
 
-# ============================================================
-# VALIDAR DIRECTORIO DE INSTALACIÓN
-# ============================================================
-
-validate_install_directory() {
-
-	[[ -d "${INSTALL_DIR}" ]] ||
 		fail \
-			"El directorio de instalación no existe: ${INSTALL_DIR}"
+			"La unidad ${service} no apunta al binario esperado:
 
-	[[ "$(stat -c '%u' -- "${INSTALL_DIR}")" == "0" ]] ||
-		fail \
-			"El directorio de instalación no pertenece a root: ${INSTALL_DIR}"
+${source}
 
-	# No permitimos eliminar accidentalmente directorios críticos.
-	case "${INSTALL_DIR}" in
+Binario esperado:
 
-		"/" |
-		"/etc" |
-		"/usr" |
-		"/usr/bin" |
-		"/usr/sbin" |
-		"/bin" |
-		"/sbin" |
-		"/lib" |
-		"/lib64" |
-		"/var" |
-		"/home" |
-		"/root")
-			fail \
-				"Ruta de instalación insegura. Se rechazará la desinstalación: ${INSTALL_DIR}"
-			;;
-
-	esac
-}
-
-# ============================================================
-# VALIDAR ARCHIVO PROPIO
-# ============================================================
-
-validate_file_if_exists() {
-
-	local description="$1"
-	local file="$2"
-
-	[[ -e "${file}" || -L "${file}" ]] || return 0
-
-	[[ -f "${file}" && ! -L "${file}" ]] ||
-		fail \
-			"${description} no es un archivo regular: ${file}"
-
-	[[ "$(stat -c '%u' -- "${file}")" == "0" ]] ||
-		fail \
-			"${description} no pertenece a root: ${file}"
+${expected_binary}"
+	fi
 }
 
 # ============================================================
@@ -641,65 +640,53 @@ validate_file_if_exists() {
 
 validate_installation() {
 
-	section "VALIDANDO INSTALACIÓN"
-
-	validate_install_directory
-
-	validate_file_if_exists \
-		"Binario HCR" \
-		"${BINARY_PATH}"
-
-	validate_file_if_exists \
-		"Certificado TLS" \
-		"${TLS_CERT_PATH}"
-
-	validate_file_if_exists \
-		"Clave privada TLS" \
-		"${TLS_KEY_PATH}"
-
-	validate_file_if_exists \
-		"Desinstalador" \
-		"${SCRIPT_PATH}"
-
+	local index
+	local service
 	local source
+	local link
 
-	for source in "${UNIT_SOURCE_PATHS[@]}"; do
+	section "LOCALIZANDO INSTALACIÓN"
 
-		[[ -f "${source}" ]] ||
-			fail \
-				"La unidad HCR no existe: ${source}"
+	if [[ "${#SERVICES[@]}" -eq 0 ]]; then
 
-		is_hcr_unit "${source}" ||
-			fail \
-				"La unidad no coincide con el formato esperado de HCR Server: ${source}"
+		error_message \
+			"No se encontró ninguna instancia instalada de HCR Server."
 
-	done
+		printf '\n'
 
-	success "La instalación corresponde al formato del instalador HCR Server actual."
-}
+		detail "Se buscaron unidades con el formato:"
+		detail "${SERVICE_PREFIX}-<PUERTO>.service"
 
-# ============================================================
-# CONFIRMACIÓN
-# ============================================================
+		printf '\n'
 
-confirm_uninstall() {
+		info \
+			"Ejemplo esperado: hcr-server-8080.service"
 
-	printf '\n'
+		exit 0
+	fi
 
-	warning \
-		"Esta operación eliminará completamente HCR Server."
+	discover_installation_directory
 
 	printf '\n'
 
-	detail \
-		"Instancias systemd: ${#SERVICE_NAMES[@]}"
+	success \
+		"Se encontraron ${#SERVICES[@]} instancia(s) de HCR Server."
 
-	local service_name
+	printf '\n'
 
-	for service_name in "${SERVICE_NAMES[@]}"; do
+	for index in "${!SERVICES[@]}"; do
 
-		detail \
-			"Servicio: ${service_name}.service"
+		service="${SERVICES[$index]}"
+		source="${UNIT_SOURCES[$index]}"
+		link="${UNIT_LINKS[$index]}"
+
+		detail "Servicio: ${service}"
+		detail "Unidad: ${source}"
+		detail "Enlace: ${link}"
+
+		validate_unit \
+			"${service}" \
+			"${source}"
 
 	done
 
@@ -709,32 +696,63 @@ confirm_uninstall() {
 	detail "Binario: ${BINARY_PATH}"
 	detail "Certificado: ${TLS_CERT_PATH}"
 	detail "Clave privada: ${TLS_KEY_PATH}"
-	detail "Desinstalador: ${SCRIPT_PATH}"
+
+	printf '\n'
+
+	success "Instalación localizada correctamente."
+}
+
+# ============================================================
+# MOSTRAR RESUMEN ANTES DE ELIMINAR
+# ============================================================
+
+confirm_uninstall() {
+
+	local service
 
 	printf '\n'
 
 	warning \
-		"El directorio del panel NO será eliminado."
+		"Esta acción eliminará el servicio y sus archivos de instalación."
+
+	printf '\n'
+
+	printf '%b\n' \
+		"${BOLD}${WHITE}Instancias detectadas:${RESET}"
+
+	for service in "${SERVICES[@]}"; do
+		detail "${service}"
+	done
+
+	printf '\n'
+
+	detail "Directorio:     ${INSTALL_DIR}"
+	detail "Binario:        ${BINARY_PATH}"
+	detail "Certificado:    ${TLS_CERT_PATH}"
+	detail "Clave privada:  ${TLS_KEY_PATH}"
+
+	printf '\n'
 
 	warning \
-		"Solo se eliminarán archivos y unidades pertenecientes a HCR Server."
+		"El directorio completo del panel NO será eliminado."
+
+	warning \
+		"Solo se eliminarán los archivos pertenecientes a HCR Server."
 
 	printf '\n'
 
 	read -r -p \
-		"¿Deseas continuar? [s/N]: " \
-		answer
+		"¿Deseas continuar? [s/N]: " answer
 
 	case "${answer,,}" in
 
 		s|si|sí|y|yes)
+			printf '\n'
 			;;
 
 		*)
 			printf '\n'
-
 			info "Desinstalación cancelada."
-
 			exit 0
 			;;
 
@@ -747,50 +765,38 @@ confirm_uninstall() {
 
 stop_services() {
 
+	local service
+
 	section "DETENIENDO SERVICIOS"
 
-	local service_name
-
-	if [[ "${#SERVICE_NAMES[@]}" -eq 0 ]]; then
-
-		info "No existen instancias systemd que detener."
-
-		return 0
-	fi
-
-	for service_name in "${SERVICE_NAMES[@]}"; do
+	for service in "${SERVICES[@]}"; do
 
 		if systemctl is-active --quiet \
-			"${service_name}.service" \
-			2>/dev/null; then
+			"${service}" 2>/dev/null; then
 
 			spinner_start \
-				"Deteniendo ${service_name}.service..."
+				"Deteniendo ${service}..."
 
-			if systemctl stop \
-				"${service_name}.service"; then
+			if systemctl stop "${service}"; then
 
 				spinner_stop
 
 				success \
-					"${service_name}.service detenido."
+					"${service} detenido."
 
 			else
 
 				spinner_stop
 
 				fail \
-					"No se pudo detener ${service_name}.service."
-
+					"No se pudo detener ${service}."
 			fi
 
 		else
 
 			info \
-				"${service_name}.service ya estaba detenido."
-
+				"${service} ya estaba detenido."
 		fi
-
 	done
 }
 
@@ -800,44 +806,38 @@ stop_services() {
 
 disable_services() {
 
+	local service
+
 	section "DESHABILITANDO SERVICIOS"
 
-	local service_name
-
-	for service_name in "${SERVICE_NAMES[@]}"; do
+	for service in "${SERVICES[@]}"; do
 
 		if systemctl is-enabled --quiet \
-			"${service_name}.service" \
-			2>/dev/null; then
+			"${service}" 2>/dev/null; then
 
 			spinner_start \
-				"Deshabilitando ${service_name}.service..."
+				"Deshabilitando ${service}..."
 
-			if systemctl disable \
-				"${service_name}.service" \
-				>/dev/null 2>&1; then
+			if systemctl disable "${service}" >/dev/null 2>&1; then
 
 				spinner_stop
 
 				success \
-					"${service_name}.service deshabilitado."
+					"${service} deshabilitado."
 
 			else
 
 				spinner_stop
 
 				fail \
-					"No se pudo deshabilitar ${service_name}.service."
-
+					"No se pudo deshabilitar ${service}."
 			fi
 
 		else
 
 			info \
-				"${service_name}.service ya estaba deshabilitado."
-
+				"${service} ya estaba deshabilitado."
 		fi
-
 	done
 }
 
@@ -847,166 +847,108 @@ disable_services() {
 
 remove_dropins() {
 
+	local service
+	local dropin_dir
+
 	section "ELIMINANDO DROP-INS"
 
-	local directory
-	local found=0
+	for service in "${SERVICES[@]}"; do
 
-	shopt -s nullglob
+		dropin_dir="${SYSTEMD_DIR}/${service}.d"
 
-	for directory in \
-		"${SYSTEMD_DIR}/${SERVICE_PREFIX}.service.d" \
-		"${SYSTEMD_DIR}/${SERVICE_PREFIX}-"*.service.d
-	do
+		if [[ -d "${dropin_dir}" ]]; then
 
-		[[ -d "${directory}" ]] || continue
+			spinner_start \
+				"Eliminando configuración adicional de ${service}..."
 
-		found=1
+			if rm -rf -- "${dropin_dir}"; then
 
-		spinner_start \
-			"Eliminando $(basename -- "${directory}")..."
+				spinner_stop
 
-		rm -rf -- "${directory}"
+				success \
+					"Drop-ins eliminados: ${service}"
 
-		spinner_stop
+			else
 
-		success \
-			"Drop-in eliminado: $(basename -- "${directory}")"
+				spinner_stop
 
+				fail \
+					"No se pudieron eliminar los drop-ins de ${service}."
+			fi
+
+		else
+
+			info \
+				"No existen drop-ins para ${service}."
+		fi
 	done
-
-	if [[ "${found}" -eq 0 ]]; then
-
-		info "No existen drop-ins de HCR Server."
-
-	fi
 }
 
 # ============================================================
 # ELIMINAR UNIDADES SYSTEMD
 # ============================================================
 
-remove_systemd_units() {
+remove_units() {
+
+	local index
+	local service
+	local link
+	local source
 
 	section "ELIMINANDO UNIDADES SYSTEMD"
 
-	local service_name
-	local source
-	local link
+	for index in "${!SERVICES[@]}"; do
 
-	for service_name in "${SERVICE_NAMES[@]}"; do
-
-		source=""
-		link="${SYSTEMD_DIR}/${service_name}.service"
-
-		for source_candidate in "${UNIT_SOURCE_PATHS[@]}"; do
-
-			if [[ "$(basename -- "${source_candidate}" .service)" == "${service_name}" ]]; then
-
-				source="${source_candidate}"
-				break
-
-			fi
-
-		done
+		service="${SERVICES[$index]}"
+		link="${UNIT_LINKS[$index]}"
+		source="${UNIT_SOURCES[$index]}"
 
 		# ----------------------------------------------------
-		# Eliminar enlace en /etc/systemd/system
+		# Eliminar enlace/unidad en /etc/systemd/system.
 		# ----------------------------------------------------
 
-		if [[ -L "${link}" || -f "${link}" ]]; then
+		if [[ -e "${link}" || -L "${link}" ]]; then
 
 			spinner_start \
-				"Eliminando ${service_name}.service de systemd..."
+				"Eliminando ${service}..."
 
-			rm -f -- "${link}"
+			if rm -f -- "${link}"; then
 
-			spinner_stop
+				spinner_stop
 
-			success \
-				"${service_name}.service eliminado de systemd."
+				success \
+					"Unidad/enlace eliminado: ${service}"
+
+			else
+
+				spinner_stop
+
+				fail \
+					"No se pudo eliminar ${link}."
+			fi
 
 		else
 
 			info \
-				"${service_name}.service no existe en ${SYSTEMD_DIR}."
-
+				"La unidad ${link} ya no existe."
 		fi
 
 		# ----------------------------------------------------
-		# Eliminar unidad fuente.
+		# Si la fuente está fuera del directorio de instalación,
+		# se eliminará posteriormente junto con las unidades.
 		# ----------------------------------------------------
 
-		if [[ -n "${source}" &&
-			  -f "${source}" ]]; then
+		if [[ -f "${source}" &&
+			  "${source}" != "${UNIT_LINKS[$index]}" ]]; then
 
-			# Si la unidad está fuera del directorio de
-			# instalación esperado, no se elimina.
-			case "${source}" in
-
-				"${INSTALL_DIR}/"*)
-					;;
-
-				*)
-					fail \
-						"La unidad ${source} está fuera del directorio de instalación esperado."
-					;;
-
-			esac
-
-			spinner_start \
-				"Eliminando archivo de unidad ${service_name}..."
-
-			rm -f -- "${source}"
-
-			spinner_stop
-
-			success \
-				"Archivo de unidad eliminado."
-
+			# La fuente normalmente está en INSTALL_DIR.
+			# Se elimina en remove_installation_files.
+			true
 		fi
-
 	done
 
 	# --------------------------------------------------------
-	# Eliminar cualquier unidad HCR que haya quedado dentro
-	# de /etc/systemd/system y coincida exactamente con el
-	# formato del instalador.
-	# --------------------------------------------------------
-
-	local file
-
-	shopt -s nullglob
-
-	for file in \
-		"${SYSTEMD_DIR}/${SERVICE_PREFIX}-"*.service
-	do
-
-		[[ -f "${file}" || -L "${file}" ]] || continue
-
-		local normalized
-
-		normalized="$(normalize_path "${file}")"
-
-		if [[ -f "${normalized}" ]] &&
-			is_hcr_unit "${normalized}"; then
-
-			spinner_start \
-				"Eliminando unidad HCR restante..."
-
-			rm -f -- "${file}"
-
-			spinner_stop
-
-			success \
-				"Unidad restante eliminada: $(basename -- "${file}")"
-
-		fi
-
-	done
-
-	# --------------------------------------------------------
-	# Recargar systemd.
+	# Recargar systemd después de eliminar unidades.
 	# --------------------------------------------------------
 
 	spinner_start \
@@ -1016,7 +958,8 @@ remove_systemd_units() {
 
 		spinner_stop
 
-		success "systemd recargado."
+		success \
+			"systemd recargado correctamente."
 
 	else
 
@@ -1024,42 +967,117 @@ remove_systemd_units() {
 
 		fail \
 			"No se pudo recargar systemd."
-
 	fi
 
 	# --------------------------------------------------------
 	# Limpiar estados failed.
 	# --------------------------------------------------------
 
-	systemctl reset-failed \
-		2>/dev/null ||
-		true
+	for service in "${SERVICES[@]}"; do
+
+		systemctl reset-failed \
+			"${service}" \
+			>/dev/null 2>&1 ||
+			true
+
+	done
 }
 
 # ============================================================
-# ELIMINAR ARCHIVOS TEMPORALES
+# ELIMINAR ARCHIVOS DE INSTALACIÓN
 # ============================================================
 
-remove_temp_units() {
+remove_file_if_exists() {
 
-	section "ELIMINANDO ARCHIVOS TEMPORALES"
+	local description="$1"
+	local file="$2"
 
-	local file
-	local found=0
-
-	while IFS= read -r -d '' file; do
-
-		found=1
+	if [[ -e "${file}" || -L "${file}" ]]; then
 
 		spinner_start \
-			"Eliminando temporal $(basename -- "${file}")..."
+			"Eliminando ${description}..."
 
-		rm -f -- "${file}"
+		if rm -f -- "${file}"; then
 
-		spinner_stop
+			spinner_stop
 
-		success \
-			"Temporal eliminado."
+			success \
+				"${description} eliminado."
+
+		else
+
+			spinner_stop
+
+			fail \
+				"No se pudo eliminar: ${file}"
+		fi
+
+	else
+
+		info \
+			"${description} ya no existe."
+	fi
+}
+
+remove_installation_files() {
+
+	local service
+	local source
+	local temp_file
+	local index
+
+	section "ELIMINANDO ARCHIVOS DE HCR SERVER"
+
+	# --------------------------------------------------------
+	# Eliminar unidades fuente.
+	# --------------------------------------------------------
+
+	for index in "${!SERVICES[@]}"; do
+
+		source="${UNIT_SOURCES[$index]}"
+
+		# Evitar eliminar algo fuera del directorio detectado.
+		if [[ "${source}" == "${INSTALL_DIR}/"* ]]; then
+
+			remove_file_if_exists \
+				"Unidad ${SERVICES[$index]}" \
+				"${source}"
+
+		fi
+	done
+
+	# --------------------------------------------------------
+	# Binario
+	# --------------------------------------------------------
+
+	remove_file_if_exists \
+		"Binario HCR Server" \
+		"${BINARY_PATH}"
+
+	# --------------------------------------------------------
+	# TLS
+	# --------------------------------------------------------
+
+	remove_file_if_exists \
+		"Certificado TLS" \
+		"${TLS_CERT_PATH}"
+
+	remove_file_if_exists \
+		"Clave privada TLS" \
+		"${TLS_KEY_PATH}"
+
+	# --------------------------------------------------------
+	# Temporales creados por el instalador.
+	#
+	# Ejemplo:
+	# .hcr-server-8080.XXXXXX.service
+	# --------------------------------------------------------
+
+	while IFS= read -r -d '' temp_file; do
+
+		remove_file_if_exists \
+			"Archivo temporal de systemd" \
+			"${temp_file}"
 
 	done < <(
 		find "${INSTALL_DIR}" \
@@ -1067,129 +1085,67 @@ remove_temp_units() {
 			-type f \
 			-name ".${SERVICE_PREFIX}-*.service" \
 			-print0 \
-			2>/dev/null ||
-			true
+			2>/dev/null
 	)
 
-	if [[ "${found}" -eq 0 ]]; then
+	# --------------------------------------------------------
+	# Otros temporales ocultos relacionados con systemd.
+	# --------------------------------------------------------
 
-		info "No se encontraron archivos temporales."
+	while IFS= read -r -d '' temp_file; do
 
-	fi
-}
+		remove_file_if_exists \
+			"Archivo temporal HCR" \
+			"${temp_file}"
 
-# ============================================================
-# ELIMINAR ARCHIVOS DEL SERVICIO
-# ============================================================
-
-remove_installation_files() {
-
-	section "ELIMINANDO ARCHIVOS DE HCR SERVER"
-
-	local file
-	local files=(
-		"${BINARY_PATH}"
-		"${TLS_CERT_PATH}"
-		"${TLS_KEY_PATH}"
+	done < <(
+		find "${INSTALL_DIR}" \
+			-maxdepth 1 \
+			-type f \
+			-name ".${SERVICE_PREFIX}-*.XXXXXX*" \
+			-print0 \
+			2>/dev/null
 	)
-
-	for file in "${files[@]}"; do
-
-		if [[ -e "${file}" || -L "${file}" ]]; then
-
-			spinner_start \
-				"Eliminando $(basename -- "${file}")..."
-
-			rm -f -- "${file}"
-
-			spinner_stop
-
-			success \
-				"Eliminado: $(basename -- "${file}")"
-
-		else
-
-			detail \
-				"No existe: $(basename -- "${file}")"
-
-		fi
-
-	done
 }
 
 # ============================================================
-# ELIMINAR DESINSTALADOR
+# VERIFICAR PROCESOS
 # ============================================================
 
-remove_uninstaller() {
+verify_no_processes() {
 
-	section "ELIMINANDO DESINSTALADOR"
-
-	if [[ -f "${SCRIPT_PATH}" ]]; then
-
-		spinner_start \
-			"Eliminando desinstalador..."
-
-		rm -f -- "${SCRIPT_PATH}"
-
-		spinner_stop
-
-		success "Desinstalador eliminado."
-
-	else
-
-		info "El desinstalador ya no existe."
-
-	fi
-}
-
-# ============================================================
-# VERIFICAR PROCESOS HCR
-# ============================================================
-
-verify_processes() {
+	local service
+	local pid
+	local failed=0
 
 	section "VERIFICANDO PROCESOS"
 
-	local pid
-	local exe
-	local found=0
+	for service in "${SERVICES[@]}"; do
 
-	for pid in /proc/[0-9]*; do
+		pid="$(
+			systemctl show \
+				--property=MainPID \
+				--value \
+				"${service}" \
+				2>/dev/null ||
+				true
+		)"
 
-		[[ -d "${pid}" ]] || continue
-
-		exe="${pid}/exe"
-
-		[[ -e "${exe}" ]] || continue
-
-		local resolved
-
-		resolved="$(readlink -f -- "${exe}" 2>/dev/null || true)"
-
-		[[ -n "${resolved}" ]] || continue
-
-		if [[ "${resolved}" == "${BINARY_PATH}" ||
-			  "${resolved}" == "${BINARY_PATH} (deleted)" ]]; then
-
-			found=1
+		if [[ "${pid}" =~ ^[1-9][0-9]*$ ]]; then
 
 			error_message \
-				"El proceso HCR todavía está ejecutándose: PID $(basename -- "${pid}")"
+				"${service} todavía reporta un proceso principal: PID ${pid}"
 
+			failed=1
+
+		else
+
+			success \
+				"No queda proceso principal para ${service}."
 		fi
-
 	done
 
-	if [[ "${found}" -eq 0 ]]; then
-
-		success \
-			"No quedan procesos HCR Server ejecutándose."
-
-		return 0
-	fi
-
-	return 1
+	return "${failed}"
 }
 
 # ============================================================
@@ -1198,80 +1154,74 @@ verify_processes() {
 
 verify_uninstall() {
 
-	section "VERIFICACIÓN FINAL"
-
-	local failed=0
-	local service_name
-	local source
+	local service
+	local index
 	local link
+	local source
+	local dropin_dir
+	local failed=0
+
+	section "VERIFICACIÓN FINAL"
 
 	# --------------------------------------------------------
 	# Servicios
 	# --------------------------------------------------------
 
-	for service_name in "${SERVICE_NAMES[@]}"; do
+	for service in "${SERVICES[@]}"; do
 
 		if systemctl is-active --quiet \
-			"${service_name}.service" \
-			2>/dev/null; then
+			"${service}" 2>/dev/null; then
 
 			error_message \
-				"${service_name}.service todavía está activo."
+				"${service} todavía está activo."
 
 			failed=1
 
 		else
 
 			success \
-				"${service_name}.service detenido."
+				"${service} está detenido."
 
 		fi
 
 		if systemctl is-enabled --quiet \
-			"${service_name}.service" \
-			2>/dev/null; then
+			"${service}" 2>/dev/null; then
 
 			error_message \
-				"${service_name}.service todavía está habilitado."
+				"${service} todavía está habilitado."
 
 			failed=1
 
 		else
 
 			success \
-				"${service_name}.service deshabilitado."
+				"${service} está deshabilitado."
 
 		fi
 
 	done
 
 	# --------------------------------------------------------
-	# Enlaces / unidades.
+	# Unidades
 	# --------------------------------------------------------
 
-	for link in "${UNIT_LINK_PATHS[@]}"; do
+	for index in "${!SERVICES[@]}"; do
+
+		link="${UNIT_LINKS[$index]}"
+		source="${UNIT_SOURCES[$index]}"
 
 		if [[ -e "${link}" || -L "${link}" ]]; then
 
 			error_message \
-				"La unidad systemd todavía existe: ${link}"
+				"La unidad todavía existe: ${link}"
 
 			failed=1
 
 		else
 
 			success \
-				"Unidad systemd eliminada: $(basename -- "${link}")"
-
+				"Unidad eliminada: $(basename -- "${link}")"
 		fi
-
-	done
-
-	# --------------------------------------------------------
-	# Archivos fuente.
-	# --------------------------------------------------------
-
-	for source in "${UNIT_SOURCE_PATHS[@]}"; do
 
 		if [[ -e "${source}" || -L "${source}" ]]; then
 
@@ -1284,41 +1234,32 @@ verify_uninstall() {
 
 			success \
 				"Unidad fuente eliminada."
-
 		fi
 
-	done
+		dropin_dir="${SYSTEMD_DIR}/${SERVICES[$index]}.d"
 
-	# --------------------------------------------------------
-	# Drop-ins.
-	# --------------------------------------------------------
-
-	local dropin
-
-	for dropin in \
-		"${SYSTEMD_DIR}/${SERVICE_PREFIX}.service.d" \
-		"${SYSTEMD_DIR}/${SERVICE_PREFIX}-"*.service.d
-	do
-
-		if [[ -e "${dropin}" ]]; then
+		if [[ -e "${dropin_dir}" ]]; then
 
 			error_message \
-				"Drop-in restante: ${dropin}"
+				"El drop-in todavía existe: ${dropin_dir}"
 
 			failed=1
 
-		fi
+		else
 
+			success \
+				"Drop-ins eliminados."
+		fi
 	done
 
 	# --------------------------------------------------------
-	# Archivos principales.
+	# Archivos
 	# --------------------------------------------------------
 
 	if [[ -e "${BINARY_PATH}" ]]; then
 
 		error_message \
-			"El binario todavía existe."
+			"El binario todavía existe: ${BINARY_PATH}"
 
 		failed=1
 
@@ -1326,13 +1267,12 @@ verify_uninstall() {
 
 		success \
 			"Binario HCR eliminado."
-
 	fi
 
 	if [[ -e "${TLS_CERT_PATH}" ]]; then
 
 		error_message \
-			"El certificado TLS todavía existe."
+			"El certificado todavía existe: ${TLS_CERT_PATH}"
 
 		failed=1
 
@@ -1340,13 +1280,12 @@ verify_uninstall() {
 
 		success \
 			"Certificado TLS eliminado."
-
 	fi
 
 	if [[ -e "${TLS_KEY_PATH}" ]]; then
 
 		error_message \
-			"La clave privada TLS todavía existe."
+			"La clave privada todavía existe: ${TLS_KEY_PATH}"
 
 		failed=1
 
@@ -1354,28 +1293,66 @@ verify_uninstall() {
 
 		success \
 			"Clave privada TLS eliminada."
-
 	fi
 
 	# --------------------------------------------------------
-	# Procesos.
+	# Procesos
 	# --------------------------------------------------------
 
-	if ! verify_processes; then
-
+	if ! verify_no_processes; then
 		failed=1
-
 	fi
 
-	# --------------------------------------------------------
-	# Resultado.
-	# --------------------------------------------------------
+	return "${failed}"
+}
 
-	if [[ "${failed}" -ne 0 ]]; then
-		return 1
+# ============================================================
+# ELIMINAR DESINSTALADOR
+# ============================================================
+
+remove_self() {
+
+	if [[ -f "${SCRIPT_PATH}" ]]; then
+
+		spinner_start \
+			"Eliminando desinstalador..."
+
+		if rm -f -- "${SCRIPT_PATH}"; then
+
+			spinner_stop
+
+			success \
+				"Desinstalador eliminado."
+
+		else
+
+			spinner_stop
+
+			error_message \
+				"No se pudo eliminar automáticamente el desinstalador."
+
+			return 1
+		fi
+	else
+
+		info \
+			"El desinstalador ya no existe."
 	fi
 
 	return 0
+}
+
+# ============================================================
+# LIMPIAR LOCK
+# ============================================================
+
+remove_lock_file() {
+
+	local lock_file="${SYSTEMD_DIR}/.${SERVICE_PREFIX}.uninstall.lock"
+
+	release_uninstall_lock
+
+	rm -f -- "${lock_file}" >/dev/null 2>&1 || true
 }
 
 # ============================================================
@@ -1397,13 +1374,13 @@ show_summary() {
 		"Todas las instancias de HCR Server fueron detenidas."
 
 	detail \
-		"Todos los servicios HCR fueron deshabilitados."
+		"Todos los servicios fueron deshabilitados."
 
 	detail \
-		"Las unidades systemd fueron eliminadas."
+		"Todas las unidades systemd fueron eliminadas."
 
 	detail \
-		"Los drop-ins de HCR fueron eliminados."
+		"Los drop-ins de HCR Server fueron eliminados."
 
 	detail \
 		"El binario hcr-server fue eliminado."
@@ -1417,16 +1394,13 @@ show_summary() {
 	detail \
 		"Los archivos temporales fueron eliminados."
 
-	detail \
-		"El desinstalador fue eliminado."
-
 	printf '\n'
 
 	printf '%b\n' \
-		"${DIM}HCR Server ha sido retirado completamente del sistema.${RESET}"
+		"${DIM}El directorio del panel NO fue eliminado.${RESET}"
 
 	printf '%b\n' \
-		"${DIM}El directorio del panel NO fue eliminado.${RESET}"
+		"${DIM}La instalación de HCR Server fue retirada del sistema.${RESET}"
 
 	line
 
@@ -1449,32 +1423,32 @@ main() {
 
 	require_environment
 
-	success "Entorno compatible."
+	success \
+		"Entorno Linux + systemd válido."
 
 	# --------------------------------------------------------
 	# BLOQUEO
 	# --------------------------------------------------------
 
-	section "ADQUIRIENDO BLOQUEO"
-
 	acquire_uninstall_lock
 
-	success "Bloqueo adquirido."
+	success \
+		"Bloqueo de desinstalación adquirido."
 
 	# --------------------------------------------------------
-	# DESCUBRIR
+	# DETECCIÓN
 	# --------------------------------------------------------
 
-	discover_instances
+	discover_services
 
 	# --------------------------------------------------------
-	# VALIDAR
+	# VALIDACIÓN
 	# --------------------------------------------------------
 
 	validate_installation
 
 	# --------------------------------------------------------
-	# CONFIRMAR
+	# CONFIRMACIÓN
 	# --------------------------------------------------------
 
 	confirm_uninstall
@@ -1501,13 +1475,7 @@ main() {
 	# UNIDADES
 	# --------------------------------------------------------
 
-	remove_systemd_units
-
-	# --------------------------------------------------------
-	# TEMPORALES
-	# --------------------------------------------------------
-
-	remove_temp_units
+	remove_units
 
 	# --------------------------------------------------------
 	# ARCHIVOS
@@ -1516,20 +1484,10 @@ main() {
 	remove_installation_files
 
 	# --------------------------------------------------------
-	# DESINSTALADOR
-	# --------------------------------------------------------
-
-	remove_uninstaller
-
-	# --------------------------------------------------------
 	# VERIFICACIÓN
 	# --------------------------------------------------------
 
-	if verify_uninstall; then
-
-		show_summary
-
-	else
+	if ! verify_uninstall; then
 
 		printf '\n'
 
@@ -1539,15 +1497,67 @@ main() {
 		printf '\n'
 
 		warning \
-			"Revisa los elementos indicados anteriormente."
+			"No se eliminará automáticamente el desinstalador para permitir revisar el problema."
+
+		release_uninstall_lock
 
 		exit 1
-
 	fi
+
+	# --------------------------------------------------------
+	# ELIMINAR DESINSTALADOR
+	# --------------------------------------------------------
+
+	if ! remove_self; then
+
+		printf '\n'
+
+		warning \
+			"El servicio fue desinstalado correctamente, pero el desinstalador no pudo eliminarse."
+
+		release_uninstall_lock
+
+		exit 1
+	fi
+
+	# --------------------------------------------------------
+	# LOCK
+	# --------------------------------------------------------
+
+	remove_lock_file
+
+	# --------------------------------------------------------
+	# FINAL
+	# --------------------------------------------------------
+
+	show_summary
 }
+
+# ============================================================
+# LIMPIEZA ANTE INTERRUPCIÓN
+# ============================================================
+
+cleanup_on_exit() {
+
+	local exit_code=$?
+
+	spinner_stop
+
+	if [[ "${LOCK_FD_OPEN}" == "true" ]]; then
+		release_uninstall_lock
+	fi
+
+	exit "${exit_code}"
+}
+
+trap cleanup_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ============================================================
 # EJECUCIÓN
 # ============================================================
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	main "$@"
+fi
