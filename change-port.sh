@@ -300,6 +300,114 @@ get_current_target_port() {
 }
 
 # ============================================================
+# VERIFICAR SI UN PUERTO ES PRIVILEGIADO
+# ============================================================
+
+is_privileged_port() {
+    local port="$1"
+
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+
+    (( port >= 1 && port <= 1023 ))
+}
+
+# ============================================================
+# CONFIGURAR CAPACIDAD PARA PUERTOS PRIVILEGIADOS
+# ============================================================
+
+configure_bind_capability() {
+    local port="$1"
+
+    # --------------------------------------------------------
+    # El puerto destino NO necesita esta capacidad.
+    # Solamente se aplica al puerto de escucha HCR.
+    # --------------------------------------------------------
+
+    if ! is_privileged_port "$port"; then
+
+        # ----------------------------------------------------
+        # Si existe una capacidad específica de bind,
+        # se elimina para conservar la configuración mínima.
+        # ----------------------------------------------------
+
+        sed -E \
+            -i \
+            '/^[[:space:]]*CapabilityBoundingSet=CAP_NET_BIND_SERVICE[[:space:]]*$/d' \
+            "$UNIT_PATH"
+
+        sed -E \
+            -i \
+            '/^[[:space:]]*AmbientCapabilities=CAP_NET_BIND_SERVICE[[:space:]]*$/d' \
+            "$UNIT_PATH"
+
+        return 0
+    fi
+
+    # --------------------------------------------------------
+    # PUERTO PRIVILEGIADO
+    #
+    # CAP_NET_BIND_SERVICE permite a HCR Server abrir
+    # puertos inferiores a 1024, como 80 y 443.
+    # --------------------------------------------------------
+
+    if grep -Eq \
+        '^[[:space:]]*CapabilityBoundingSet=' \
+        "$UNIT_PATH"; then
+
+        sed -E \
+            -i \
+            's#^[[:space:]]*CapabilityBoundingSet=.*$#CapabilityBoundingSet=CAP_NET_BIND_SERVICE#' \
+            "$UNIT_PATH"
+
+    else
+
+        sed -E \
+            -i \
+            '/^\[Service\]/a CapabilityBoundingSet=CAP_NET_BIND_SERVICE' \
+            "$UNIT_PATH"
+
+    fi
+
+    if grep -Eq \
+        '^[[:space:]]*AmbientCapabilities=' \
+        "$UNIT_PATH"; then
+
+        sed -E \
+            -i \
+            's#^[[:space:]]*AmbientCapabilities=.*$#AmbientCapabilities=CAP_NET_BIND_SERVICE#' \
+            "$UNIT_PATH"
+
+    else
+
+        sed -E \
+            -i \
+            '/^\[Service\]/a AmbientCapabilities=CAP_NET_BIND_SERVICE' \
+            "$UNIT_PATH"
+
+    fi
+
+    # --------------------------------------------------------
+    # VERIFICACIÓN
+    # --------------------------------------------------------
+
+    if ! grep -Eq \
+        '^CapabilityBoundingSet=CAP_NET_BIND_SERVICE$' \
+        "$UNIT_PATH"; then
+
+        fail \
+            "No se pudo configurar CAP_NET_BIND_SERVICE en systemd."
+    fi
+
+    if ! grep -Eq \
+        '^AmbientCapabilities=CAP_NET_BIND_SERVICE$' \
+        "$UNIT_PATH"; then
+
+        fail \
+            "No se pudo configurar AmbientCapabilities para HCR Server."
+    fi
+}
+
+# ============================================================
 # MENÚ DE PUERTOS
 # ============================================================
 
@@ -401,7 +509,6 @@ ask_hcr_port() {
         # ----------------------------------------------------
         # Si es el mismo puerto actual:
         # NO se considera conflicto.
-        # Simplemente se continuará y se reiniciará el servicio.
         # ----------------------------------------------------
 
         if [[ "$NEW_PORT" == "$current_port" ]]; then
@@ -471,7 +578,6 @@ ask_target_port() {
         # ----------------------------------------------------
         # Si es el mismo puerto destino:
         # no se considera conflicto.
-        # Se reiniciará el servicio.
         # ----------------------------------------------------
 
         if [[ "$NEW_PORT" == "$current_target" ]]; then
@@ -554,6 +660,13 @@ confirm_change() {
 
         detail \
             "Puerto HCR nuevo:    ${NEW_PORT}"
+
+        if is_privileged_port "$NEW_PORT"; then
+
+            detail \
+                "Capacidad:           CAP_NET_BIND_SERVICE"
+
+        fi
 
     else
 
@@ -650,6 +763,12 @@ change_port() {
 
         fi
 
+        # ----------------------------------------------------
+        # CONFIGURAR CAPACIDAD PARA PUERTOS PRIVILEGIADOS
+        # ----------------------------------------------------
+
+        configure_bind_capability "$NEW_PORT"
+
     # --------------------------------------------------------
     # PUERTO DESTINO
     # --------------------------------------------------------
@@ -705,6 +824,17 @@ change_port() {
 
         detail \
             "Nuevo puerto HCR: ${NEW_PORT}"
+
+        # ----------------------------------------------------
+        # INFORMAR CAPACIDAD
+        # ----------------------------------------------------
+
+        if is_privileged_port "$NEW_PORT"; then
+
+            success \
+                "CAP_NET_BIND_SERVICE configurada para el puerto ${NEW_PORT}."
+
+        fi
 
     else
 
@@ -827,6 +957,29 @@ restore_backup() {
 }
 
 # ============================================================
+# ESPERAR ESCUCHA DEL PUERTO HCR
+# ============================================================
+
+wait_for_hcr_listen() {
+    local port="$1"
+    local attempts=0
+    local max_attempts=20
+
+    while (( attempts < max_attempts )); do
+
+        if check_port_usage "$port"; then
+            return 0
+        fi
+
+        sleep 0.25
+
+        attempts=$((attempts + 1))
+    done
+
+    return 1
+}
+
+# ============================================================
 # VERIFICACIÓN FINAL
 # ============================================================
 
@@ -907,12 +1060,47 @@ verify_service() {
     fi
 
     # --------------------------------------------------------
+    # VERIFICAR CAPACIDAD PARA PUERTO PRIVILEGIADO
+    # --------------------------------------------------------
+
+    if [[ "${PORT_TYPE}" == "hcr" ]] &&
+       is_privileged_port "$NEW_PORT"; then
+
+        if ! systemctl cat "${SERVICE_NAME}" 2>/dev/null |
+            grep -Eq \
+                '^CapabilityBoundingSet=CAP_NET_BIND_SERVICE$'; then
+
+            error_message \
+                "No se detectó CAP_NET_BIND_SERVICE en el servicio."
+
+            return 1
+        fi
+
+        if ! systemctl cat "${SERVICE_NAME}" 2>/dev/null |
+            grep -Eq \
+                '^AmbientCapabilities=CAP_NET_BIND_SERVICE$'; then
+
+            error_message \
+                "No se detectó AmbientCapabilities=CAP_NET_BIND_SERVICE en el servicio."
+
+            return 1
+        fi
+
+        success \
+            "Permiso para puerto privilegiado verificado."
+
+    fi
+
+    # --------------------------------------------------------
     # VERIFICAR ESCUCHA DEL PUERTO HCR
     # --------------------------------------------------------
 
     if [[ "${PORT_TYPE}" == "hcr" ]]; then
 
-        if check_port_usage "$NEW_PORT"; then
+        info \
+            "Verificando escucha del puerto HCR..."
+
+        if wait_for_hcr_listen "$NEW_PORT"; then
 
             success \
                 "El puerto HCR ${NEW_PORT} está siendo utilizado por el servicio."
@@ -921,6 +1109,13 @@ verify_service() {
 
             error_message \
                 "El servicio está activo, pero no se detectó escucha en el puerto HCR ${NEW_PORT}."
+
+            printf '\n'
+
+            systemctl \
+                --no-pager \
+                --full \
+                status "${SERVICE_NAME}" 2>&1 || true
 
             return 1
         fi
@@ -1003,6 +1198,13 @@ show_summary() {
 
         detail \
             "Tipo:     Puerto HCR"
+
+        if is_privileged_port "$NEW_PORT"; then
+
+            detail \
+                "Permiso:  CAP_NET_BIND_SERVICE"
+
+        fi
 
     else
 
