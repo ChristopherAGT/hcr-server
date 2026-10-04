@@ -221,7 +221,8 @@ check_port_available() {
 	local listeners
 
 	listeners="$(
-		ss -lntp "sport = :${port}" 2>/dev/null || true
+		ss -lntp "sport = :${port}" 2>/dev/null |
+			tail -n +2
 	)"
 
 	if [ -z "${listeners}" ]; then
@@ -308,7 +309,8 @@ require_environment() {
 		mv \
 		mktemp \
 		sleep \
-		ss
+		ss \
+		tail
 	do
 		require_command "${command_name}"
 	done
