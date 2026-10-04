@@ -222,7 +222,7 @@ header() {
 		"${BRIGHT_CYAN}${BOLD}║                                                            ║${RESET}"
 
 	printf '%b\n' \
-		"${BRIGHT_CYAN}${BOLD}║                 H C R   S E R V E R                        ║${RESET}"
+		"${BRIGHT_CYAN}${BOLD}║                 H C R   S E R V E R 2020                       ║${RESET}"
 
 	printf '%b\n' \
 		"${BRIGHT_CYAN}${BOLD}║                                                            ║${RESET}"
