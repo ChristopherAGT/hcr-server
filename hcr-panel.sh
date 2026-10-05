@@ -162,6 +162,7 @@ check_dependencies() {
             error "No se encontró el comando requerido: ${command_name}"
 
             missing=1
+
         fi
 
     done
@@ -222,6 +223,7 @@ spinner_start() {
             i=$(( (i + 1) % ${#frames[@]} ))
 
             sleep 0.08
+
         done
 
     ) &
@@ -240,6 +242,7 @@ spinner_stop() {
         kill -TERM "$pid" >/dev/null 2>&1 || true
 
         wait "$pid" >/dev/null 2>&1 || true
+
     fi
 
     printf "\r\033[2K"
@@ -465,13 +468,6 @@ get_unit_timeout() {
 # ============================================================
 # COMPROBAR LISTENER
 # ============================================================
-#
-# 0 = existe listener
-# 1 = no existe listener
-#
-# La comprobación se hace directamente contra ss.
-#
-# ============================================================
 
 is_port_listening() {
 
@@ -503,13 +499,6 @@ is_port_listening() {
 
 # ============================================================
 # OBTENER TODOS LOS PUERTOS HCR
-# ============================================================
-#
-# Devuelve:
-#
-#   puerto|activo
-#   puerto|inactivo
-#
 # ============================================================
 
 get_hcr_ports() {
@@ -828,12 +817,38 @@ download_file() {
 # ============================================================
 # EJECUTAR SCRIPT REMOTO
 # ============================================================
+#
+# IMPORTANTE:
+#
+# Esta función ahora permite pasar argumentos al script remoto.
+#
+# Ejemplo:
+#
+#   run_remote \
+#       "gestor" \
+#       "https://..." \
+#       "/tmp/script.sh" \
+#       start
+#
+# Ejecutará:
+#
+#   bash /tmp/script.sh start
+#
+# Esto es necesario para scripts que exigen:
+#
+#   start
+#   stop
+#   toggle
+#
+# ============================================================
 
 run_remote() {
 
     local name="$1"
     local url="$2"
     local path="$3"
+
+    shift 3
 
     prepare_install_dir
 
@@ -872,7 +887,7 @@ run_remote() {
     chmod 700 "$path"
     chown root:root "$path"
 
-    bash "$path"
+    bash "$path" "$@"
     local result=$?
 
     rm -f "$path"
@@ -1319,26 +1334,117 @@ show_general_status() {
 # ============================================================
 # INICIAR / DETENER SERVICIO
 # ============================================================
+#
+# CORRECCIÓN:
+#
+# start-stop-service.sh requiere:
+#
+#   start
+#   stop
+#   toggle
+#
+# Antes el panel ejecutaba:
+#
+#   bash start-stop-service.sh
+#
+# Eso provocaba:
+#
+#   Uso: start-stop-service.sh {start|stop|toggle}
+#
+# Ahora el panel selecciona explícitamente la acción y la
+# transmite al script remoto.
+#
+# ============================================================
 
 start_stop_service() {
 
     header
 
     echo -e "  ${BOLD}${WHITE}INICIAR / DETENER SERVICIO${RESET}"
-    echo -e "  ${GRAY}Inicia o detiene el Servicio HCR.${RESET}"
+    echo -e "  ${GRAY}Control del Servicio HCR.${RESET}"
+    echo
+
+    echo -e "  ${CYAN}01${RESET}  ${GREEN}Iniciar${RESET}"
+    echo -e "      ${GRAY}Inicia el Servicio HCR${RESET}"
+    echo
+
+    echo -e "  ${CYAN}02${RESET}  ${RED}Detener${RESET}"
+    echo -e "      ${GRAY}Detiene el Servicio HCR${RESET}"
+    echo
+
+    echo -e "  ${CYAN}03${RESET}  ${YELLOW}Toggle${RESET}"
+    echo -e "      ${GRAY}Cambia automáticamente entre iniciado y detenido${RESET}"
+    echo
+
+    line
+
+    echo
+
+    echo -e "  ${GRAY}00${RESET}  ${WHITE}Cancelar${RESET}"
+    echo
+
+    echo -ne "  ${CYAN}HCR / SERVICIO ›${RESET} "
+
+    local option
+    local action
+    local action_name
+
+    read -r option
+
+    case "$option" in
+
+        1|01)
+            action="start"
+            action_name="iniciar"
+            ;;
+
+        2|02)
+            action="stop"
+            action_name="detener"
+            ;;
+
+        3|03)
+            action="toggle"
+            action_name="cambiar el estado"
+            ;;
+
+        0|00)
+            info "Operación cancelada."
+            sleep 1
+            return
+            ;;
+
+        *)
+            error "Opción no válida."
+            sleep 1
+            return
+            ;;
+
+    esac
+
+    echo
+
+    info "Acción seleccionada: ${action_name}."
     echo
 
     run_remote \
         "gestor de inicio / detención del servicio" \
         "${BASE_URL}/start-stop-service.sh" \
-        "$START_STOP_SERVICE_SCRIPT"
+        "$START_STOP_SERVICE_SCRIPT" \
+        "$action"
 
     local result=$?
 
     echo
 
-    if (( result != 0 )); then
+    if (( result == 0 )); then
+
+        success "Acción '${action}' ejecutada correctamente."
+
+    else
+
         error "El gestor de inicio / detención del servicio terminó con errores."
+
     fi
 
     pause
