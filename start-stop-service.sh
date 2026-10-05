@@ -5,28 +5,28 @@ set -euo pipefail
 # HCR SERVER — SERVICE CONTROL ENGINE
 # ============================================================
 #
-# Control automático de TODAS las instancias HCR.
+# Control global de TODAS las instancias HCR.
 #
 # USO:
 #
-#   bash start-stop-service.sh start
-#   bash start-stop-service.sh stop
+#   start-stop-service.sh start
+#   start-stop-service.sh stop
+#   start-stop-service.sh toggle
 #
-# EJEMPLO:
+# COMPORTAMIENTO:
 #
-#   hcr-server-8080.service
-#   hcr-server-8880.service
-#   hcr-server-1443.service
+#   start
+#       Inicia todas las instancias HCR.
 #
-# El script detecta automáticamente TODAS las instancias
-# HCR instaladas y ejecuta la acción solicitada sobre todas.
+#   stop
+#       Detiene todas las instancias HCR.
 #
-# NO SOLICITA:
+#   toggle
+#       Si TODAS están activas:
+#           detiene todas.
 #
-#   - Servicio
-#   - Puerto
-#   - Selección
-#   - Confirmación
+#       Si UNA O MÁS están inactivas:
+#           inicia todas.
 #
 # ESTE SCRIPT NO:
 #
@@ -38,10 +38,11 @@ set -euo pipefail
 #   - Modifica el binario.
 #   - Desinstala HCR.
 #
-# SOLAMENTE:
+# Solamente utiliza:
 #
-#   start -> inicia todas las instancias.
-#   stop  -> detiene todas las instancias.
+#   systemctl start
+#   systemctl stop
+#   systemctl is-active
 #
 # ============================================================
 
@@ -184,18 +185,7 @@ spinner_start() {
 
     local message="$1"
 
-    if [[ -n "${SPINNER_PID:-}" ]]; then
-
-        if kill -0 "${SPINNER_PID}" >/dev/null 2>&1; then
-            return 0
-        fi
-
-        SPINNER_PID=""
-    fi
-
     (
-        trap 'exit 0' TERM INT HUP
-
         local frames=(
             "⠋"
             "⠙"
@@ -229,30 +219,18 @@ spinner_start() {
 
 spinner_stop() {
 
-    local pid="${SPINNER_PID:-}"
+    if [[ -n "${SPINNER_PID}" ]]; then
 
-    SPINNER_PID=""
+        kill "${SPINNER_PID}" 2>/dev/null || true
 
-    if [[ -n "$pid" ]]; then
+        wait "${SPINNER_PID}" 2>/dev/null || true
 
-        kill -TERM "$pid" >/dev/null 2>&1 || true
-
-        wait "$pid" >/dev/null 2>&1 || true
+        SPINNER_PID=""
 
         printf '\r\033[K'
+
     fi
 }
-
-# ============================================================
-# LIMPIEZA
-# ============================================================
-
-cleanup() {
-
-    spinner_stop
-}
-
-trap cleanup EXIT INT TERM HUP
 
 # ============================================================
 # ERROR
@@ -276,16 +254,19 @@ fail() {
 require_command() {
 
     command -v "$1" >/dev/null 2>&1 ||
-        fail "No se encontró el comando requerido: $1"
+        fail \
+            "No se encontró el comando requerido: $1"
 }
 
 validate_environment() {
 
     [[ "${EUID}" -eq 0 ]] ||
-        fail "Este script debe ejecutarse como root."
+        fail \
+            "Este script debe ejecutarse como root."
 
     [[ "$(uname -s)" == "Linux" ]] ||
-        fail "Este script solo funciona en Linux."
+        fail \
+            "Este script solo funciona en Linux."
 
     require_command systemctl
     require_command sleep
@@ -293,7 +274,8 @@ validate_environment() {
     require_command sort
 
     [[ -d "${SYSTEMD_DIR}" ]] ||
-        fail "No existe el directorio de systemd."
+        fail \
+            "No existe el directorio de systemd."
 }
 
 # ============================================================
@@ -314,19 +296,6 @@ discover_services() {
         [[ -n "${file}" ]] || continue
 
         service="${file%.service}"
-
-        # ----------------------------------------------------
-        # ACEPTAR ÚNICAMENTE:
-        #
-        # hcr-server-8080.service
-        # hcr-server-8880.service
-        # hcr-server-1443.service
-        #
-        # NO ACEPTAR:
-        #
-        # hcr-server.service
-        # hcr-server-test.service
-        # ----------------------------------------------------
 
         if [[ "${service}" =~ ^hcr-server-([0-9]+)$ ]]; then
 
@@ -352,7 +321,8 @@ discover_services() {
     )
 
     [[ "${#SERVICES[@]}" -gt 0 ]] ||
-        fail "No se encontraron instancias HCR Server instaladas."
+        fail \
+            "No se encontraron instancias HCR Server instaladas."
 }
 
 # ============================================================
@@ -402,6 +372,90 @@ validate_services() {
 
     success \
         "Se encontraron ${#SERVICES[@]} instancia(s) HCR."
+
+    printf '\n'
+}
+
+# ============================================================
+# DETERMINAR ESTADO GLOBAL
+# ============================================================
+#
+# Retorna:
+#
+#   0 = todas las instancias están activas
+#   1 = una o más instancias están inactivas
+#
+# ============================================================
+
+all_services_active() {
+
+    local service
+
+    for service in "${SERVICES[@]}"; do
+
+        if ! systemctl is-active --quiet "${service}"; then
+
+            return 1
+
+        fi
+
+    done
+
+    return 0
+}
+
+# ============================================================
+# RESOLVER TOGGLE
+# ============================================================
+#
+# Si TODAS están activas:
+#
+#   toggle -> stop
+#
+# Si UNA o MÁS están inactivas:
+#
+#   toggle -> start
+#
+# ============================================================
+
+resolve_toggle() {
+
+    if all_services_active; then
+
+        ACTION="stop"
+
+    else
+
+        ACTION="start"
+
+    fi
+}
+
+# ============================================================
+# MOSTRAR DECISIÓN DEL TOGGLE
+# ============================================================
+
+show_toggle_decision() {
+
+    section "MODO TOGGLE"
+
+    if [[ "${ACTION}" == "stop" ]]; then
+
+        info \
+            "Todas las instancias están activas."
+
+        info \
+            "TOGGLE → se detendrán todas las instancias."
+
+    else
+
+        info \
+            "Una o más instancias están inactivas."
+
+        info \
+            "TOGGLE → se iniciarán todas las instancias."
+
+    fi
 
     printf '\n'
 }
@@ -471,6 +525,7 @@ start_all() {
             "${failures} instancia(s) no pudieron iniciarse."
 
         return 1
+
     fi
 
     success \
@@ -544,6 +599,7 @@ stop_all() {
             "${failures} instancia(s) no pudieron detenerse."
 
         return 1
+
     fi
 
     success \
@@ -735,15 +791,6 @@ main() {
 
     ACTION="${1:-}"
 
-    # --------------------------------------------------------
-    # ÚNICAMENTE acepta:
-    #
-    #   start
-    #   stop
-    #
-    # No existe selección interactiva.
-    # --------------------------------------------------------
-
     case "${ACTION}" in
 
         start)
@@ -752,22 +799,68 @@ main() {
         stop)
             ;;
 
+        toggle)
+
+            # ------------------------------------------------
+            # TOGGLE:
+            #
+            # Todas activas -> STOP
+            # Alguna inactiva -> START
+            # ------------------------------------------------
+
+            header
+
+            validate_environment
+
+            discover_services
+
+            validate_services
+
+            resolve_toggle
+
+            show_toggle_decision
+
+            ;;
+
         *)
+
             printf '%b\n' \
-                "${RED}${FAIL}${RESET} Uso: $0 {start|stop}" >&2
+                "${RED}${FAIL}${RESET} Uso: $0 {start|stop|toggle}" >&2
 
             exit 1
+
             ;;
 
     esac
 
-    header
+    # --------------------------------------------------------
+    # Para start / stop se mantiene el flujo normal.
+    #
+    # Para toggle ya se hizo:
+    #
+    #   header
+    #   validate_environment
+    #   discover_services
+    #   validate_services
+    #   resolve_toggle
+    #
+    # --------------------------------------------------------
 
-    validate_environment
+    if [[ "${ACTION}" != "toggle" ]]; then
 
-    discover_services
+        header
 
-    validate_services
+        validate_environment
+
+        discover_services
+
+        validate_services
+
+    fi
+
+    # --------------------------------------------------------
+    # Ejecutar acción global.
+    # --------------------------------------------------------
 
     if [[ "${ACTION}" == "start" ]]; then
 
@@ -780,7 +873,7 @@ main() {
 
         fi
 
-    else
+    elif [[ "${ACTION}" == "stop" ]]; then
 
         if ! stop_all; then
 
@@ -791,7 +884,37 @@ main() {
 
         fi
 
+    elif [[ "${ACTION}" == "toggle" ]]; then
+
+        if [[ "${ACTION}" == "start" ]]; then
+
+            if ! start_all; then
+
+                show_failed_diagnostics
+
+                fail \
+                    "No todas las instancias HCR pudieron iniciarse."
+
+            fi
+
+        else
+
+            if ! stop_all; then
+
+                show_failed_diagnostics
+
+                fail \
+                    "No todas las instancias HCR pudieron detenerse."
+
+            fi
+
+        fi
+
     fi
+
+    # --------------------------------------------------------
+    # Verificación final.
+    # --------------------------------------------------------
 
     if ! verify_final_state; then
 
@@ -801,6 +924,10 @@ main() {
             "La verificación final detectó instancias en un estado incorrecto."
 
     fi
+
+    # --------------------------------------------------------
+    # Resumen.
+    # --------------------------------------------------------
 
     show_summary
 }
