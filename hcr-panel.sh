@@ -413,7 +413,7 @@ is_port_listening() {
 
                 if (
                     address ~ (":" port "$") ||
-                    address ~ ("\\[" port "\\]:" port "$")
+                    address ~ ("\\]:" port "$")
                 ) {
                     found=1
                     exit
@@ -430,21 +430,18 @@ is_port_listening() {
 }
 
 # ============================================================
-# LISTAR PUERTOS ACTIVOS
+# OBTENER TODOS LOS PUERTOS HCR
 # ============================================================
 #
 # IMPORTANTE:
 #
-# Esta función NO muestra simplemente los puertos definidos
-# en las unidades systemd.
+# Esta función muestra TODOS los puertos definidos en las
+# unidades HCR, independientemente de que estén activos o no.
 #
-# Solo muestra aquellos puertos que realmente están escuchando
-# en este momento mediante ss.
+# Devuelve:
 #
-# Ejemplo:
-#
-#   hcr-server-80.service  -> activo + escucha -> 80
-#   hcr-server-443.service -> detenido            -> NO aparece
+#   puerto|activo
+#   puerto|inactivo
 #
 # ============================================================
 
@@ -470,11 +467,13 @@ get_hcr_ports() {
         [[ -n "$port" ]] || continue
 
         if is_port_listening "$port"; then
-            echo "$port"
+            echo "${port}|activo"
+        else
+            echo "${port}|inactivo"
         fi
 
     done <<< "$units" |
-    sort -n -u
+    sort -t'|' -k1,1n -u
 }
 
 # ============================================================
@@ -487,8 +486,6 @@ header() {
 
     local count
     local installed
-    local ports
-    local port_line
 
     count="$(count_hcr_instances)"
 
@@ -496,18 +493,6 @@ header() {
         installed="${GREEN}Instalado${RESET} 🟢"
     else
         installed="${RED}No Instalado${RESET} 🔴"
-    fi
-
-    # --------------------------------------------------------
-    # SOLO PUERTOS REALMENTE ACTIVOS
-    # --------------------------------------------------------
-
-    ports="$(get_hcr_ports | paste -sd ', ' -)"
-
-    if [[ -z "$ports" ]]; then
-        port_line="${GRAY}---${RESET}"
-    else
-        port_line="${WHITE}${ports}${RESET}"
     fi
 
     echo
@@ -519,7 +504,44 @@ header() {
     echo -e "${CYAN}    ├────────────────────────────────────────────────────────┤${RESET}"
     echo -e "${CYAN}    │${RESET}  ${WHITE}HCR:${RESET} ${installed}                                      ${CYAN}│${RESET}"
     echo -e "${CYAN}    │${RESET}  ${WHITE}Instancias HCR:${RESET} ${GREEN}${count}${RESET}                                ${CYAN}│${RESET}"
-    echo -e "${CYAN}    │${RESET}  ${WHITE}Puertos:${RESET} ${port_line}                              ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │${RESET}  ${WHITE}Puertos:${RESET}                                          ${CYAN}│${RESET}"
+
+    # --------------------------------------------------------
+    # MOSTRAR TODOS LOS PUERTOS
+    # VERDE = ACTIVO
+    # AMARILLO = INACTIVO
+    # --------------------------------------------------------
+
+    local port_data
+    local port
+    local state
+
+    port_data="$(get_hcr_ports)"
+
+    if [[ -z "$port_data" ]]; then
+
+        echo -e "${CYAN}    │${RESET}      ${GRAY}---${RESET}                                               ${CYAN}│${RESET}"
+
+    else
+
+        while IFS='|' read -r port state; do
+
+            [[ -n "$port" ]] || continue
+
+            if [[ "$state" == "activo" ]]; then
+
+                echo -e "${CYAN}    │${RESET}      ${GREEN}● ${port}${RESET} ${GRAY}(activo)${RESET}                              ${CYAN}│${RESET}"
+
+            else
+
+                echo -e "${CYAN}    │${RESET}      ${YELLOW}● ${port}${RESET} ${GRAY}(inactivo)${RESET}                            ${CYAN}│${RESET}"
+
+            fi
+
+        done <<< "$port_data"
+
+    fi
+
     echo -e "${CYAN}    ╰────────────────────────────────────────────────────────╯${RESET}"
     echo
 }
@@ -1492,3 +1514,15 @@ main() {
 # ============================================================
 
 main "$@"
+
+El cambio importante está concentrado en "get_hcr_ports()" y "header()".
+
+Ahora, por ejemplo, si tienes:
+
+- "8080" escuchando → 🟢 8080 (activo)
+- "8880" detenido → 🟡 8880 (inactivo)
+- "1443" escuchando → 🟢 1443 (activo)
+
+El encabezado mostrará los tres, no solamente los que estén escuchando.
+
+Además, no cambié la lógica de los scripts externos ("add-port.sh", "start-stop-port.sh", "change-port.sh", etc.); el panel continúa funcionando como launcher y solamente utiliza la detección local para construir el encabezado.
