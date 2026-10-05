@@ -6,15 +6,24 @@ set -euo pipefail
 # ============================================================
 # Panel principal de administración HCR Server.
 #
+# El panel se encarga únicamente de:
+#
+#   • Mostrar información básica.
+#   • Presentar el menú.
+#   • Descargar y ejecutar los scripts independientes.
+#
+# La lógica específica de cada operación permanece fuera
+# de este panel.
+#
 # OPCIONES:
 #
 #   01  Instalar / reinstalar
 #   02  Desinstalar
 #   03  Gestión de puertos
 #   04  Estados de puertos
-#   05  Optimizar HCR
-#   06  Iniciar / Detener Servicio
-#   07  Reiniciar Servicio
+#   05  Iniciar / Detener Servicio
+#   06  Reiniciar Servicio
+#   07  Optimizar HCR
 #
 # ============================================================
 
@@ -42,10 +51,9 @@ CHANGE_PORT_SCRIPT="${TEMP_DIR}/change-port.sh"
 DELETE_PORT_SCRIPT="${TEMP_DIR}/delete-port.sh"
 
 STATUS_PORT_SCRIPT="${TEMP_DIR}/status-port.sh"
-OPTIMIZE_SCRIPT="${TEMP_DIR}/optimize.sh"
-
 START_STOP_SERVICE_SCRIPT="${TEMP_DIR}/start-stop-service.sh"
 RESTART_SERVICE_SCRIPT="${TEMP_DIR}/restart-service.sh"
+OPTIMIZE_SCRIPT="${TEMP_DIR}/optimize.sh"
 
 SYSTEMD_DIR="/etc/systemd/system"
 
@@ -95,10 +103,6 @@ warning() {
 
 info() {
     echo -e "  ${CYAN}●${RESET} $1"
-}
-
-detail() {
-    echo -e "      ${GRAY}•${RESET} $1"
 }
 
 line() {
@@ -190,6 +194,18 @@ spinner_stop() {
 # ============================================================
 # OBTENER UNIDADES HCR
 # ============================================================
+#
+# Únicamente busca unidades:
+#
+#   hcr-server.service
+#   hcr-server-8000.service
+#   hcr-server-8001.service
+#
+# No inspecciona puertos mediante ss.
+# No consulta conexiones.
+# No analiza configuración de rendimiento.
+#
+# ============================================================
 
 get_hcr_units() {
 
@@ -206,6 +222,8 @@ get_hcr_units() {
         find "$SYSTEMD_DIR" \
             -maxdepth 1 \
             -type f \
+            -name 'hcr-server.service' \
+            -o \
             -name 'hcr-server-*.service' \
             -printf '%f\n' 2>/dev/null || true
 
@@ -232,7 +250,7 @@ count_hcr_instances() {
 }
 
 # ============================================================
-# ESTADO GENERAL DE HCR
+# ESTADO GENERAL DE INSTALACIÓN
 # ============================================================
 
 hcr_is_installed() {
@@ -284,7 +302,15 @@ get_unit_path() {
 }
 
 # ============================================================
-# OBTENER PUERTO HCR
+# OBTENER PUERTO DE UNA UNIDAD
+# ============================================================
+#
+# Esta función solamente lee el archivo .service.
+#
+# No comprueba sockets.
+# No ejecuta ss.
+# No analiza conexiones.
+#
 # ============================================================
 
 get_unit_listen_port() {
@@ -304,18 +330,41 @@ get_unit_listen_port() {
 }
 
 # ============================================================
-# LISTAR PUERTOS PARA EL ENCABEZADO
+# OBTENER PUERTOS ACTIVOS
+# ============================================================
+#
+# Solo considera activos los servicios que systemd reporta
+# como "active".
+#
+# Ejemplo:
+#
+#   hcr-server-8000.service  active
+#   hcr-server-8001.service  inactive
+#
+# Resultado:
+#
+#   8000
+#
+# No utiliza ss.
+# No inspecciona conexiones.
+# No genera una tabla.
+#
 # ============================================================
 
-get_hcr_ports() {
+get_active_hcr_ports() {
 
     local unit
     local path
     local port
+    local state
 
     while IFS= read -r unit; do
 
         [[ -n "$unit" ]] || continue
+
+        state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+
+        [[ "$state" == "active" ]] || continue
 
         path="$(get_unit_path "$unit")"
 
@@ -333,23 +382,18 @@ get_hcr_ports() {
 # ENCABEZADO PRINCIPAL
 # ============================================================
 #
-# IMPORTANTE:
-#
-# Este es el ÚNICO encabezado visual del panel.
-#
-# NO muestra:
-#
-#   INSTANCIAS HCR SERVER
-#   tablas
-#   FRAME
-#   TIMEOUT
-#   TRANSPORTE
-#
-# Únicamente muestra:
+# El encabezado únicamente muestra:
 #
 #   HCR
 #   Instancias HCR
-#   Puertos
+#   Puertos Activos
+#
+# No muestra tablas.
+# No muestra estados detallados.
+# No muestra frame.
+# No muestra timeout.
+# No muestra transporte.
+# No muestra destino.
 #
 # ============================================================
 
@@ -359,7 +403,7 @@ header() {
 
     local count
     local installed
-    local ports
+    local active_ports
     local port_line
 
     count="$(count_hcr_instances)"
@@ -370,12 +414,12 @@ header() {
         installed="${RED}No Instalado${RESET} 🔴"
     fi
 
-    ports="$(get_hcr_ports | paste -sd ',' -)"
+    active_ports="$(get_active_hcr_ports | paste -sd ', ' -)"
 
-    if [[ -z "$ports" ]]; then
-        port_line="${GRAY}---${RESET}"
+    if [[ -z "$active_ports" ]]; then
+        port_line="${GRAY}Ninguno${RESET}"
     else
-        port_line="${WHITE}${ports}${RESET}"
+        port_line="${WHITE}${active_ports}${RESET}"
     fi
 
     echo
@@ -387,7 +431,7 @@ header() {
     echo -e "${CYAN}    ├────────────────────────────────────────────────────────┤${RESET}"
     echo -e "${CYAN}    │${RESET}  ${WHITE}HCR:${RESET} ${installed}                                      ${CYAN}│${RESET}"
     echo -e "${CYAN}    │${RESET}  ${WHITE}Instancias HCR:${RESET} ${GREEN}${count}${RESET}                                ${CYAN}│${RESET}"
-    echo -e "${CYAN}    │${RESET}  ${WHITE}Puertos:${RESET} ${port_line}                              ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │${RESET}  ${WHITE}Puertos Activos:${RESET} ${port_line}                         ${CYAN}│${RESET}"
     echo -e "${CYAN}    ╰────────────────────────────────────────────────────────╯${RESET}"
     echo
 }
@@ -631,7 +675,7 @@ prepare_installation() {
 }
 
 # ============================================================
-# OPCIÓN 1 — INSTALAR
+# OPCIÓN 1 — INSTALAR / REINSTALAR
 # ============================================================
 
 install_service() {
@@ -829,13 +873,11 @@ port_management_menu() {
 # OPCIÓN 4 — ESTADOS DE PUERTOS
 # ============================================================
 #
-# IMPORTANTE:
+# El panel NO implementa la lógica de estados.
 #
-# NO se muestra ninguna tabla.
+# Simplemente descarga y ejecuta:
 #
-# NO se llama a show_instances.
-#
-# Se conserva únicamente el encabezado principal.
+#   status-port.sh
 #
 # ============================================================
 
@@ -844,64 +886,95 @@ status_ports() {
     header
 
     echo -e "  ${BOLD}${WHITE}ESTADOS DE PUERTOS${RESET}"
-    echo -e "  ${GRAY}Consulta el estado general de las instancias HCR Server.${RESET}"
+    echo -e "  ${GRAY}Abriendo comprobador independiente de puertos.${RESET}"
     echo
 
-    local units
-    units="$(get_hcr_units)"
+    run_remote \
+        "comprobador de estados de puertos" \
+        "${BASE_URL}/status-port.sh" \
+        "$STATUS_PORT_SCRIPT"
 
-    if [[ -z "$units" ]]; then
+    local result=$?
 
-        warning "No se detectaron instancias HCR Server."
+    echo
 
-    else
-
-        local active=0
-        local stopped=0
-        local failed=0
-        local unit
-        local state
-
-        while IFS= read -r unit; do
-
-            [[ -n "$unit" ]] || continue
-
-            state="$(systemctl is-active "$unit" 2>/dev/null || true)"
-
-            case "$state" in
-
-                active)
-                    active=$((active + 1))
-                    ;;
-
-                failed)
-                    failed=$((failed + 1))
-                    ;;
-
-                *)
-                    stopped=$((stopped + 1))
-                    ;;
-
-            esac
-
-        done <<< "$units"
-
-        echo -e "  ${WHITE}Estado general:${RESET}"
-        echo
-
-        echo -e "      ${GREEN}●${RESET} Activas:   ${GREEN}${active}${RESET}"
-        echo -e "      ${GRAY}●${RESET} Detenidas: ${GRAY}${stopped}${RESET}"
-        echo -e "      ${RED}●${RESET} Error:     ${RED}${failed}${RESET}"
-
+    if (( result != 0 )); then
+        error "El comprobador de puertos terminó con errores."
     fi
-
-    echo
 
     pause
 }
 
 # ============================================================
-# OPCIÓN 5 — OPTIMIZAR HCR
+# OPCIÓN 5 — INICIAR / DETENER SERVICIO
+# ============================================================
+#
+# Toda la lógica pertenece a:
+#
+#   start-stop-service.sh
+#
+# Este panel solamente lo ejecuta.
+#
+# ============================================================
+
+start_stop_service() {
+
+    header
+
+    echo -e "  ${BOLD}${WHITE}INICIAR / DETENER SERVICIO${RESET}"
+    echo -e "  ${GRAY}Administra el servicio HCR Server.${RESET}"
+    echo
+
+    run_remote \
+        "gestor de servicio HCR" \
+        "${BASE_URL}/start-stop-service.sh" \
+        "$START_STOP_SERVICE_SCRIPT"
+
+    local result=$?
+
+    echo
+
+    if (( result == 0 )); then
+        success "Operación de servicio finalizada."
+    else
+        error "El gestor de servicio terminó con errores."
+    fi
+
+    pause
+}
+
+# ============================================================
+# OPCIÓN 6 — REINICIAR SERVICIO
+# ============================================================
+
+restart_service() {
+
+    header
+
+    echo -e "  ${BOLD}${WHITE}REINICIAR SERVICIO${RESET}"
+    echo -e "  ${GRAY}Reinicia el servicio HCR Server.${RESET}"
+    echo
+
+    run_remote \
+        "reiniciador del servicio HCR" \
+        "${BASE_URL}/restart-service.sh" \
+        "$RESTART_SERVICE_SCRIPT"
+
+    local result=$?
+
+    echo
+
+    if (( result == 0 )); then
+        success "Servicio reiniciado correctamente."
+    else
+        error "El reiniciador del servicio terminó con errores."
+    fi
+
+    pause
+}
+
+# ============================================================
+# OPCIÓN 7 — OPTIMIZAR HCR
 # ============================================================
 
 optimize_service() {
@@ -925,66 +998,6 @@ optimize_service() {
         success "Optimización finalizada."
     else
         error "El optimizador terminó con errores."
-    fi
-
-    pause
-}
-
-# ============================================================
-# OPCIÓN 6 — INICIAR / DETENER SERVICIO
-# ============================================================
-
-start_stop_service() {
-
-    header
-
-    echo -e "  ${BOLD}${WHITE}INICIAR / DETENER SERVICIO${RESET}"
-    echo -e "  ${GRAY}Administra el servicio HCR Server completo.${RESET}"
-    echo
-
-    run_remote \
-        "gestor de servicio HCR" \
-        "${BASE_URL}/start-stop-service.sh" \
-        "$START_STOP_SERVICE_SCRIPT"
-
-    local result=$?
-
-    echo
-
-    if (( result == 0 )); then
-        success "Operación de servicio finalizada."
-    else
-        error "El gestor de servicio terminó con errores."
-    fi
-
-    pause
-}
-
-# ============================================================
-# OPCIÓN 7 — REINICIAR SERVICIO
-# ============================================================
-
-restart_service() {
-
-    header
-
-    echo -e "  ${BOLD}${WHITE}REINICIAR SERVICIO${RESET}"
-    echo -e "  ${GRAY}Reinicia el servicio HCR Server completo.${RESET}"
-    echo
-
-    run_remote \
-        "reiniciador del servicio HCR" \
-        "${BASE_URL}/restart-service.sh" \
-        "$RESTART_SERVICE_SCRIPT"
-
-    local result=$?
-
-    echo
-
-    if (( result == 0 )); then
-        success "Servicio reiniciado correctamente."
-    else
-        error "El reiniciador del servicio terminó con errores."
     fi
 
     pause
@@ -1019,22 +1032,22 @@ show_menu() {
 
     printf "  ${CYAN}04${RESET}  ${MAGENTA}◉${RESET}  ${WHITE}%-28s${RESET}\n" \
         "Estados de puertos"
-    echo -e "      ${GRAY}Muestra el estado general de las instancias${RESET}"
+    echo -e "      ${GRAY}Abre el comprobador independiente status-port.sh${RESET}"
     echo
 
-    printf "  ${CYAN}05${RESET}  ${MAGENTA}⚙${RESET}  ${WHITE}%-28s${RESET}\n" \
+    printf "  ${CYAN}05${RESET}  ${MAGENTA}↕${RESET}  ${WHITE}%-28s${RESET}\n" \
+        "Iniciar / Detener Servicio"
+    echo -e "      ${GRAY}Inicia o detiene el Servicio HCR${RESET}"
+    echo
+
+    printf "  ${CYAN}06${RESET}  ${MAGENTA}↻${RESET}  ${WHITE}%-28s${RESET}\n" \
+        "Reiniciar Servicio"
+    echo -e "      ${GRAY}Reinicia el Servicio HCR${RESET}"
+    echo
+
+    printf "  ${CYAN}07${RESET}  ${MAGENTA}⚙${RESET}  ${WHITE}%-28s${RESET}\n" \
         "Optimizar HCR"
     echo -e "      ${GRAY}Ajusta el rendimiento del Protocolo${RESET}"
-    echo
-
-    printf "  ${CYAN}06${RESET}  ${MAGENTA}↕${RESET}  ${WHITE}%-28s${RESET}\n" \
-        "Iniciar / Detener Servicio"
-    echo -e "      ${GRAY}Inicia o detiene el Servicio HCR por completo.${RESET}"
-    echo
-
-    printf "  ${CYAN}07${RESET}  ${MAGENTA}↻${RESET}  ${WHITE}%-28s${RESET}\n" \
-        "Reiniciar Servicio"
-    echo -e "      ${GRAY}Reinicia el Servicio HCR por completo.${RESET}"
     echo
 
     echo -e "  ${DARK}────────────────────────────────────────────────────────${RESET}"
@@ -1086,17 +1099,17 @@ main() {
 
             5|05)
 
-                optimize_service
+                start_stop_service
                 ;;
 
             6|06)
 
-                start_stop_service
+                restart_service
                 ;;
 
             7|07)
 
-                restart_service
+                optimize_service
                 ;;
 
             0|00)
