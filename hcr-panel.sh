@@ -21,6 +21,23 @@ set -euo pipefail
 #   06  Reiniciar Servicio
 #   07  Optimizar HCR
 #
+# IMPORTANTE:
+#
+# Este panel funciona como PANEL / LAUNCHER.
+#
+# Las operaciones principales son realizadas por sus
+# respectivos scripts remotos.
+#
+# El panel únicamente conserva:
+#
+#   - Detección de instalaciones
+#   - Detección de instancias
+#   - Detección de puertos
+#   - Estado real mediante ss
+#   - Interfaz
+#   - Descarga y ejecución de scripts
+#   - Selección de instancia para optimización
+#
 # ============================================================
 
 set +e
@@ -120,6 +137,45 @@ require_root() {
 }
 
 # ============================================================
+# COMPROBAR DEPENDENCIAS BÁSICAS
+# ============================================================
+
+check_dependencies() {
+
+    local missing=0
+    local command_name
+
+    for command_name in \
+        bash \
+        curl \
+        systemctl \
+        ss \
+        awk \
+        grep \
+        sed \
+        find \
+        sort \
+        wc; do
+
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+
+            error "No se encontró el comando requerido: ${command_name}"
+
+            missing=1
+        fi
+
+    done
+
+    if (( missing != 0 )); then
+
+        echo
+        error "Faltan dependencias necesarias para ejecutar el panel."
+
+        exit 1
+    fi
+}
+
+# ============================================================
 # DIRECTORIOS
 # ============================================================
 
@@ -208,11 +264,21 @@ get_hcr_units() {
         find "$SYSTEMD_DIR" \
             -maxdepth 1 \
             -type f \
-            -name 'hcr-server-*.service' \
-            -printf '%f\n' 2>/dev/null ||
+            -name 'hcr-server.service' \
+            -printf '%f\n' \
+            2>/dev/null ||
+            true
+
+        find "$SYSTEMD_DIR" \
+            -maxdepth 1 \
+            -type f \
+            -name 'hcr-server-[0-9]*.service' \
+            -printf '%f\n' \
+            2>/dev/null ||
             true
 
     } |
+    grep -E '^hcr-server(-[0-9]+)?\.service$' |
     sort -u
 }
 
@@ -231,7 +297,11 @@ count_hcr_instances() {
         tr -d ' '
     )"
 
-    echo "${count:-0}"
+    if [[ "$count" =~ ^[0-9]+$ ]]; then
+        echo "$count"
+    else
+        echo "0"
+    fi
 }
 
 # ============================================================
@@ -414,7 +484,9 @@ is_port_listening() {
             {
                 address = $4
 
-                if (address ~ (":" port "$")) {
+                sub(/^.*:/, "", address)
+
+                if (address == port) {
                     found = 1
                     exit
                 }
@@ -501,21 +573,6 @@ header() {
     echo -e "${CYAN}    │${RESET}  ${WHITE}Instancias HCR:${RESET} ${GREEN}${count}${RESET}                                ${CYAN}│${RESET}"
     echo -e "${CYAN}    │${RESET}  ${WHITE}Puertos:${RESET}                                          ${CYAN}│${RESET}"
 
-    # --------------------------------------------------------
-    # PUERTOS
-    #
-    # ACTIVOS:
-    #   Se muestran primero.
-    #   Color verde.
-    #
-    # INACTIVOS:
-    #   Se muestran debajo.
-    #   Color amarillo.
-    #
-    # Todos los puertos de cada grupo se colocan
-    # horizontalmente en la misma línea.
-    # --------------------------------------------------------
-
     local port_data
     local port
     local state
@@ -553,25 +610,13 @@ header() {
 
     fi
 
-    # --------------------------------------------------------
-    # ACTIVOS
-    # --------------------------------------------------------
-
     if [[ -n "$active_ports" ]]; then
         echo -e "${CYAN}    │${RESET}  ${active_ports}"
     fi
 
-    # --------------------------------------------------------
-    # INACTIVOS
-    # --------------------------------------------------------
-
     if [[ -n "$inactive_ports" ]]; then
         echo -e "${CYAN}    │${RESET}  ${inactive_ports}"
     fi
-
-    # --------------------------------------------------------
-    # SI NO EXISTE NINGÚN PUERTO
-    # --------------------------------------------------------
 
     if [[ -z "$active_ports" && -z "$inactive_ports" ]]; then
         echo -e "${CYAN}    │${RESET}  ${GRAY}Sin puertos configurados${RESET}"
@@ -588,6 +633,7 @@ header() {
 show_instances() {
 
     local units
+
     units="$(get_hcr_units)"
 
     echo -e "  ${BOLD}${WHITE}INSTANCIAS HCR SERVER${RESET}"
@@ -597,6 +643,7 @@ show_instances() {
 
         warning "No se detectaron instancias HCR Server."
         echo
+
         return 1
     fi
 
@@ -655,11 +702,13 @@ select_hcr_unit() {
 
     local title="${1:-Seleccionar instancia}"
     local units
+
     units="$(get_hcr_units)"
 
     if [[ -z "$units" ]]; then
 
         warning "No existen instancias HCR Server disponibles."
+
         return 1
     fi
 
@@ -673,7 +722,7 @@ select_hcr_unit() {
     local port
     local state_display
 
-    declare -a UNIT_ARRAY
+    declare -a UNIT_ARRAY=()
 
     while IFS= read -r unit; do
 
@@ -686,10 +735,15 @@ select_hcr_unit() {
         path="$(get_unit_path "$unit")"
         port="$(get_unit_listen_port "$unit" "$path")"
 
-        if is_port_listening "$port"; then
+        if [[ "$port" =~ ^[0-9]+$ ]] &&
+           is_port_listening "$port"; then
+
             state_display="${GREEN}ACTIVO${RESET}"
+
         else
+
             state_display="${YELLOW}INACTIVO${RESET}"
+
         fi
 
         printf "  ${CYAN}%02d${RESET}  ${WHITE}Puerto %-6s${RESET} ${GRAY}%-28s${RESET} %b\n" \
@@ -725,6 +779,7 @@ select_hcr_unit() {
         fi
 
         error "Selección no válida."
+
     done
 }
 
@@ -736,21 +791,38 @@ download_file() {
 
     local url="$1"
     local destination="$2"
+    local temporary="${destination}.download"
 
-    curl -fL \
+    rm -f "$temporary"
+
+    if ! curl -fL \
         --retry 3 \
         --connect-timeout 15 \
         --max-time 120 \
         -sS \
         "$url" \
-        -o "${destination}.download"
+        -o "$temporary"; then
 
-    chmod 700 "${destination}.download"
-    chown root:root "${destination}.download"
+        rm -f "$temporary"
+
+        return 1
+    fi
+
+    if [[ ! -s "$temporary" ]]; then
+
+        rm -f "$temporary"
+
+        return 1
+    fi
+
+    chmod 700 "$temporary"
+    chown root:root "$temporary"
 
     mv -f \
-        "${destination}.download" \
+        "$temporary" \
         "$destination"
+
+    return 0
 }
 
 # ============================================================
@@ -765,6 +837,8 @@ run_remote() {
 
     prepare_install_dir
 
+    rm -f "$path"
+
     spinner_start "Descargando ${name}..."
 
     if ! curl -fL \
@@ -777,15 +851,26 @@ run_remote() {
 
         spinner_stop
 
+        rm -f "$path"
+
         error "No se pudo descargar ${name}."
+
+        return 1
+    fi
+
+    spinner_stop
+
+    if [[ ! -s "$path" ]]; then
+
+        rm -f "$path"
+
+        error "El archivo descargado está vacío."
 
         return 1
     fi
 
     chmod 700 "$path"
     chown root:root "$path"
-
-    spinner_stop
 
     bash "$path"
     local result=$?
@@ -825,7 +910,7 @@ prepare_certificates() {
 
     rm -f "$temp_key" "$temp_cert"
 
-    openssl req \
+    if ! openssl req \
         -x509 \
         -newkey rsa:2048 \
         -sha256 \
@@ -834,7 +919,14 @@ prepare_certificates() {
         -keyout "$temp_key" \
         -out "$temp_cert" \
         -subj "/CN=hcr-server-temporary" \
-        >/dev/null 2>&1
+        >/dev/null 2>&1; then
+
+        rm -f "$temp_key" "$temp_cert"
+
+        error "No se pudo generar el certificado temporal."
+
+        return 1
+    fi
 
     chown root:root "$temp_key" "$temp_cert"
 
@@ -859,21 +951,31 @@ prepare_installation() {
 
     info "Descargando instalador..."
 
-    download_file \
+    if ! download_file \
         "${BASE_URL}/install.sh" \
-        "$INSTALL_SCRIPT"
+        "$INSTALL_SCRIPT"; then
+
+        error "No se pudo descargar install.sh."
+
+        return 1
+    fi
 
     chmod 700 "$INSTALL_SCRIPT"
 
     info "Descargando binario..."
 
-    download_file \
+    if ! download_file \
         "${BASE_URL}/hcr-server" \
-        "$BINARY_PATH"
+        "$BINARY_PATH"; then
+
+        error "No se pudo descargar el binario hcr-server."
+
+        return 1
+    fi
 
     chmod 700 "$BINARY_PATH"
 
-    prepare_certificates
+    prepare_certificates || return 1
 
     echo
 
@@ -900,6 +1002,8 @@ prepare_installation() {
     chmod 600 "$KEY_PATH"
 
     success "Paquete de instalación preparado correctamente."
+
+    return 0
 }
 
 # ============================================================
@@ -925,7 +1029,14 @@ install_service() {
 
     echo
 
-    cd "$INSTALL_DIR"
+    cd "$INSTALL_DIR" || {
+
+        error "No se pudo acceder a ${INSTALL_DIR}."
+
+        pause
+
+        return
+    }
 
     if bash "$INSTALL_SCRIPT"; then
 
@@ -976,10 +1087,17 @@ uninstall_service() {
     run_remote \
         "desinstalador" \
         "${BASE_URL}/uninstall.sh" \
-        "$UNINSTALL_SCRIPT" ||
-        true
+        "$UNINSTALL_SCRIPT"
+
+    local result=$?
 
     echo
+
+    if (( result == 0 )); then
+        success "Desinstalador ejecutado correctamente."
+    else
+        error "El desinstalador terminó con errores."
+    fi
 
     pause
 }
@@ -1073,10 +1191,15 @@ add_port() {
     run_remote \
         "gestor de nuevos puertos" \
         "${BASE_URL}/add-port.sh" \
-        "$ADD_PORT_SCRIPT" ||
-        true
+        "$ADD_PORT_SCRIPT"
+
+    local result=$?
 
     echo
+
+    if (( result != 0 )); then
+        error "El gestor de puertos terminó con errores."
+    fi
 
     pause
 }
@@ -1096,10 +1219,15 @@ start_stop_port() {
     run_remote \
         "gestor de inicio / detención de puerto" \
         "${BASE_URL}/start-stop-port.sh" \
-        "$START_STOP_PORT_SCRIPT" ||
-        true
+        "$START_STOP_PORT_SCRIPT"
+
+    local result=$?
 
     echo
+
+    if (( result != 0 )); then
+        error "El gestor de inicio / detención terminó con errores."
+    fi
 
     pause
 }
@@ -1119,10 +1247,15 @@ modify_port() {
     run_remote \
         "gestor de modificación de puerto" \
         "${BASE_URL}/change-port.sh" \
-        "$CHANGE_PORT_SCRIPT" ||
-        true
+        "$CHANGE_PORT_SCRIPT"
+
+    local result=$?
 
     echo
+
+    if (( result != 0 )); then
+        error "El gestor de modificación terminó con errores."
+    fi
 
     pause
 }
@@ -1142,10 +1275,15 @@ delete_port() {
     run_remote \
         "eliminador de puerto" \
         "${BASE_URL}/delete-port.sh" \
-        "$DELETE_PORT_SCRIPT" ||
-        true
+        "$DELETE_PORT_SCRIPT"
+
+    local result=$?
 
     echo
+
+    if (( result != 0 )); then
+        error "El eliminador de puerto terminó con errores."
+    fi
 
     pause
 }
@@ -1165,10 +1303,15 @@ show_general_status() {
     run_remote \
         "gestor de estados de puertos" \
         "${BASE_URL}/status-port.sh" \
-        "$STATUS_PORT_SCRIPT" ||
-        true
+        "$STATUS_PORT_SCRIPT"
+
+    local result=$?
 
     echo
+
+    if (( result != 0 )); then
+        error "El gestor de estados terminó con errores."
+    fi
 
     pause
 }
@@ -1188,10 +1331,15 @@ start_stop_service() {
     run_remote \
         "gestor de inicio / detención del servicio" \
         "${BASE_URL}/start-stop-service.sh" \
-        "$START_STOP_SERVICE_SCRIPT" ||
-        true
+        "$START_STOP_SERVICE_SCRIPT"
+
+    local result=$?
 
     echo
+
+    if (( result != 0 )); then
+        error "El gestor de inicio / detención del servicio terminó con errores."
+    fi
 
     pause
 }
@@ -1211,10 +1359,15 @@ restart_service() {
     run_remote \
         "gestor de reinicio del servicio" \
         "${BASE_URL}/restart-service.sh" \
-        "$RESTART_SERVICE_SCRIPT" ||
-        true
+        "$RESTART_SERVICE_SCRIPT"
+
+    local result=$?
 
     echo
+
+    if (( result != 0 )); then
+        error "El gestor de reinicio terminó con errores."
+    fi
 
     pause
 }
@@ -1230,6 +1383,8 @@ prepare_instance_optimizer() {
 
     prepare_install_dir
 
+    rm -f "$OPTIMIZE_SCRIPT"
+
     spinner_start "Preparando optimizador para ${unit_name}..."
 
     if ! curl -fL \
@@ -1242,23 +1397,53 @@ prepare_instance_optimizer() {
 
         spinner_stop
 
+        rm -f "$OPTIMIZE_SCRIPT"
+
         error "No se pudo descargar el optimizador."
 
         return 1
     fi
 
-    sed -E \
+    if [[ ! -s "$OPTIMIZE_SCRIPT" ]]; then
+
+        spinner_stop
+
+        rm -f "$OPTIMIZE_SCRIPT"
+
+        error "El optimizador descargado está vacío."
+
+        return 1
+    fi
+
+    if ! sed -E \
         -i \
         "s#^UNIT_PATH=.*#UNIT_PATH=\"${unit_path}\"#" \
-        "$OPTIMIZE_SCRIPT"
+        "$OPTIMIZE_SCRIPT"; then
 
-    sed -E \
+        spinner_stop
+
+        rm -f "$OPTIMIZE_SCRIPT"
+
+        error "No se pudo preparar UNIT_PATH."
+
+        return 1
+    fi
+
+    if ! sed -E \
         -i \
         "s#^SERVICE_NAME=.*#SERVICE_NAME=\"${unit_name%.service}\"#" \
-        "$OPTIMIZE_SCRIPT"
+        "$OPTIMIZE_SCRIPT"; then
+
+        spinner_stop
+
+        rm -f "$OPTIMIZE_SCRIPT"
+
+        error "No se pudo preparar SERVICE_NAME."
+
+        return 1
+    fi
 
     chmod 700 "$OPTIMIZE_SCRIPT"
-
     chown root:root "$OPTIMIZE_SCRIPT"
 
     spinner_stop
@@ -1417,6 +1602,8 @@ show_menu() {
 main() {
 
     require_root
+
+    check_dependencies
 
     prepare_install_dir
 
