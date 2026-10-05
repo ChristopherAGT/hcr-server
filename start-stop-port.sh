@@ -356,7 +356,7 @@ discover_instances() {
 	)
 
 	# --------------------------------------------------------
-	# Ordenar puertos numéricamente
+	# ORDENAR PUERTOS NUMÉRICAMENTE
 	# --------------------------------------------------------
 
 	if [ "${#PORTS[@]}" -gt 1 ]; then
@@ -607,6 +607,7 @@ toggle_instance() {
 					"Puerto ${port}: ${RED}Apagado${RESET}"
 
 			fi
+
 		fi
 
 	# --------------------------------------------------------
@@ -630,6 +631,7 @@ toggle_instance() {
 					"El puerto ${port} no quedó encendido."
 
 			fi
+
 		fi
 
 	fi
@@ -652,7 +654,7 @@ main_loop() {
 	while true; do
 
 		# ----------------------------------------------------
-		# Detectar nuevamente las instancias en cada ciclo.
+		# DETECTAR NUEVAMENTE LAS INSTANCIAS EN CADA CICLO
 		# ----------------------------------------------------
 
 		discover_instances
@@ -660,14 +662,17 @@ main_loop() {
 		show_instances
 
 		# ----------------------------------------------------
-		# Si no existen instancias
+		# SI NO EXISTEN INSTANCIAS
 		# ----------------------------------------------------
 
 		if [ "${#PORTS[@]}" -eq 0 ]; then
 
 			read -r input
 
-			if [ "${input}" = "00" ]; then
+			# 0 y 00 permiten salir.
+			# Visualmente solo se muestra 00.
+
+			if [[ "${input}" == "0" || "${input}" == "00" ]]; then
 				break
 			fi
 
@@ -678,11 +683,20 @@ main_loop() {
 
 		# ----------------------------------------------------
 		# SALIR
+		#
+		# Acepta:
+		#   0
+		#   00
+		#
+		# Pero visualmente solamente se muestra:
+		#
+		#   00 ➜ Salir
 		# ----------------------------------------------------
 
-		if [ "${input}" = "00" ]; then
+		if [[ "${input}" == "0" || "${input}" == "00" ]]; then
 
 			break
+
 		fi
 
 		# ----------------------------------------------------
@@ -702,7 +716,7 @@ main_loop() {
 		fi
 
 		# ----------------------------------------------------
-		# Convertir selección a índice del array.
+		# CONVERTIR SELECCIÓN A ÍNDICE DEL ARRAY
 		# ----------------------------------------------------
 
 		selected_index=$((10#${input} - 1))
