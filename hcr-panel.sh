@@ -986,10 +986,6 @@ port_management_menu() {
         echo -e "  ${GRAY}Administración individual de las instancias HCR.${RESET}"
         echo
 
-        show_instances
-
-        echo
-
         echo -e "  ${CYAN}01${RESET}  ${MAGENTA}＋${RESET}  ${WHITE}Añadir puerto${RESET}"
         echo -e "      ${GRAY}Crear una nueva instancia HCR${RESET}"
         echo
