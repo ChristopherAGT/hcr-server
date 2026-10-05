@@ -4,11 +4,13 @@ set -euo pipefail
 # ============================================================
 #          HCR SERVER — OPTIMIZADOR GLOBAL
 # ============================================================
+#
 # Modifica parámetros de rendimiento de TODAS las instancias
-# HCR Server creadas por el instalador.
+# HCR Server detectadas.
 #
-# Detecta automáticamente:
+# Instancias compatibles:
 #
+#   hcr-server.service
 #   hcr-server-80.service
 #   hcr-server-8080.service
 #   hcr-server-8880.service
@@ -17,13 +19,20 @@ set -euo pipefail
 #
 # IMPORTANTE:
 #
-# Este script NO crea ni elimina servicios.
-# Este script NO modifica puertos.
-# Este script NO modifica el binario.
-# Este script NO habilita ni deshabilita servicios.
+# Este script NO:
 #
-# Los cambios de rendimiento se aplican GLOBALMENTE a todas
-# las instancias HCR encontradas.
+#   - crea servicios
+#   - elimina servicios
+#   - modifica puertos
+#   - modifica el binario
+#   - habilita servicios
+#   - deshabilita servicios
+#
+# Este script SOLO modifica parámetros de rendimiento.
+#
+# TODOS los cambios se aplican GLOBALMENTE a TODAS las
+# instancias HCR detectadas.
+#
 # ============================================================
 
 PATH="/usr/sbin:/usr/bin:/sbin:/bin"
@@ -36,8 +45,10 @@ export PATH LC_ALL LANG
 # CONFIGURACIÓN
 # ============================================================
 
-SERVICE_PREFIX="hcr-server-"
 SYSTEMD_DIR="/etc/systemd/system"
+
+SERVICE_BASE="hcr-server.service"
+SERVICE_PREFIX="hcr-server-"
 
 # ============================================================
 # VALORES RECOMENDADOS
@@ -100,71 +111,51 @@ MODIFIED_FILES=()
 # ============================================================
 
 clear_screen() {
+
     clear 2>/dev/null || true
+
 }
 
 line() {
+
     printf '%b\n' \
         "${DIM}────────────────────────────────────────────────────────────${RESET}"
-}
 
-header() {
-
-    clear_screen
-
-    printf '\n'
-
-    printf '%b\n' \
-        "${BRIGHT_CYAN}${BOLD}╔════════════════════════════════════════════════════════════╗${RESET}"
-
-    printf '%b\n' \
-        "${BRIGHT_CYAN}${BOLD}║                 HCR SERVER — OPTIMIZADOR                 ║${RESET}"
-
-    printf '%b\n' \
-        "${BRIGHT_CYAN}${BOLD}║              CONFIGURACIÓN GLOBAL                         ║${RESET}"
-
-    printf '%b\n' \
-        "${BRIGHT_CYAN}${BOLD}╚════════════════════════════════════════════════════════════╝${RESET}"
-
-    printf '\n'
-}
-
-section() {
-
-    printf '\n%b\n' \
-        "${BRIGHT_BLUE}${BOLD}${DIAMOND} $1${RESET}"
-
-    line
 }
 
 success() {
 
     printf '%b\n' \
         "${GREEN}${OK}${RESET} $1"
+
 }
 
 info() {
 
     printf '%b\n' \
         "${CYAN}${ARROW}${RESET} $1"
+
 }
 
 warning() {
 
     printf '%b\n' \
         "${YELLOW}${WARN}${RESET} $1"
+
 }
 
 error_message() {
 
     printf '%b\n' \
         "${RED}${FAIL}${RESET} $1" >&2
+
 }
 
 detail() {
 
     printf '%b\n' \
         "  ${DIM}${BULLET}${RESET} $1"
+
 }
 
 # ============================================================
@@ -175,7 +166,19 @@ spinner_start() {
 
     local message="$1"
 
+    if [[ -n "${SPINNER_PID}" ]]; then
+
+        if kill -0 "${SPINNER_PID}" 2>/dev/null; then
+            return 0
+        fi
+
+        SPINNER_PID=""
+
+    fi
+
     (
+        trap 'exit 0' TERM INT HUP
+
         local frames=(
             "⠋"
             "⠙"
@@ -205,25 +208,29 @@ spinner_start() {
     ) &
 
     SPINNER_PID=$!
+
 }
 
 spinner_stop() {
 
-    if [[ -n "${SPINNER_PID}" ]]; then
+    local pid="${SPINNER_PID:-}"
 
-        kill "${SPINNER_PID}" 2>/dev/null || true
+    SPINNER_PID=""
 
-        wait "${SPINNER_PID}" 2>/dev/null || true
+    if [[ -n "$pid" ]]; then
 
-        SPINNER_PID=""
+        kill -TERM "$pid" 2>/dev/null || true
 
-        printf '\r\033[K'
+        wait "$pid" 2>/dev/null || true
 
     fi
+
+    printf '\r\033[K'
+
 }
 
 # ============================================================
-# ERROR
+# ERROR FATAL
 # ============================================================
 
 fail() {
@@ -235,6 +242,7 @@ fail() {
     error_message "$1"
 
     exit 1
+
 }
 
 # ============================================================
@@ -245,10 +253,11 @@ require_command() {
 
     command -v "$1" >/dev/null 2>&1 ||
         fail "No se encontró el comando requerido: $1"
+
 }
 
 # ============================================================
-# VALIDACIÓN DEL ENTORNO
+# VALIDAR ENTORNO
 # ============================================================
 
 validate_environment() {
@@ -269,6 +278,7 @@ validate_environment() {
     require_command head
     require_command cut
     require_command mktemp
+    require_command awk
 
     [[ -d "${SYSTEMD_DIR}" ]] ||
         fail "No existe el directorio de systemd."
@@ -276,12 +286,64 @@ validate_environment() {
 }
 
 # ============================================================
-# DESCUBRIR SERVICIOS
+# DESCUBRIR SERVICIOS HCR
+# ============================================================
+#
+# Detecta:
+#
+#   hcr-server.service
+#   hcr-server-XXXX.service
+#
 # ============================================================
 
 discover_services() {
 
     SERVICES=()
+
+    {
+        if [[ -f "${SYSTEMD_DIR}/${SERVICE_BASE}" ]]; then
+            printf '%s\n' "${SERVICE_BASE}"
+        fi
+
+        find "${SYSTEMD_DIR}" \
+            -maxdepth 1 \
+            -type f \
+            -name "${SERVICE_PREFIX}*.service" \
+            -printf '%f\n' \
+            2>/dev/null |
+            grep -E '^hcr-server-[0-9]+\.service$' ||
+            true
+
+    } |
+    sort -V |
+    while IFS= read -r service; do
+
+        [[ -n "${service}" ]] || continue
+
+        printf '%s\n' "${service}"
+
+    done |
+    while IFS= read -r service; do
+
+        [[ -n "${service}" ]] || continue
+
+        SERVICES+=("${service}")
+
+    done
+
+    # --------------------------------------------------------
+    # IMPORTANTE:
+    #
+    # Los while anteriores pueden ejecutarse en subshell según
+    # el shell utilizado. Para evitarlo, hacemos la detección
+    # directamente en un array mediante mapfile.
+    # --------------------------------------------------------
+
+    SERVICES=()
+
+    if [[ -f "${SYSTEMD_DIR}/${SERVICE_BASE}" ]]; then
+        SERVICES+=("${SERVICE_BASE}")
+    fi
 
     while IFS= read -r service; do
 
@@ -290,21 +352,19 @@ discover_services() {
         SERVICES+=("${service}")
 
     done < <(
-
         find "${SYSTEMD_DIR}" \
             -maxdepth 1 \
             -type f \
-            -name "${SERVICE_PREFIX}*.service" \
+            -name "${SERVICE_PREFIX}[0-9]*.service" \
             -printf '%f\n' \
             2>/dev/null |
             grep -E '^hcr-server-[0-9]+\.service$' |
             sort -V
-
     )
 
     ((${#SERVICES[@]} > 0)) ||
         fail \
-            "No se encontraron instancias HCR Server creadas por el instalador."
+            "No se encontraron instancias HCR Server."
 
 }
 
@@ -346,9 +406,9 @@ get_value_from_unit() {
 
         max_download_frame)
 
-            grep -oE -- \
-                '--max-download-frame[[:space:]]+[0-9]+' \
-                "${unit}" |
+            grep -oE \
+                -- '--max-download-frame[[:space:]]+[0-9]+' \
+                "${unit}" 2>/dev/null |
                 grep -oE '[0-9]+$' |
                 head -n1 ||
                 true
@@ -357,9 +417,9 @@ get_value_from_unit() {
 
         download_poll_timeout)
 
-            grep -oE -- \
-                '--download-poll-timeout[[:space:]]+[0-9]+(ms|s|m|h)' \
-                "${unit}" |
+            grep -oE \
+                -- '--download-poll-timeout[[:space:]]+[0-9]+(ms|s|m|h)' \
+                "${unit}" 2>/dev/null |
                 grep -oE '[0-9]+(ms|s|m|h)$' |
                 head -n1 ||
                 true
@@ -368,8 +428,9 @@ get_value_from_unit() {
 
         limit_nofile)
 
-            grep -E '^LimitNOFILE=' \
-                "${unit}" |
+            grep -E \
+                '^LimitNOFILE=' \
+                "${unit}" 2>/dev/null |
                 cut -d= -f2 |
                 head -n1 ||
                 true
@@ -378,8 +439,9 @@ get_value_from_unit() {
 
         tasks_max)
 
-            grep -E '^TasksMax=' \
-                "${unit}" |
+            grep -E \
+                '^TasksMax=' \
+                "${unit}" 2>/dev/null |
                 cut -d= -f2 |
                 head -n1 ||
                 true
@@ -388,8 +450,9 @@ get_value_from_unit() {
 
         memory_max)
 
-            grep -E '^MemoryMax=' \
-                "${unit}" |
+            grep -E \
+                '^MemoryMax=' \
+                "${unit}" 2>/dev/null |
                 cut -d= -f2 |
                 head -n1 ||
                 true
@@ -398,8 +461,9 @@ get_value_from_unit() {
 
         memory_swap_max)
 
-            grep -E '^MemorySwapMax=' \
-                "${unit}" |
+            grep -E \
+                '^MemorySwapMax=' \
+                "${unit}" 2>/dev/null |
                 cut -d= -f2 |
                 head -n1 ||
                 true
@@ -408,8 +472,9 @@ get_value_from_unit() {
 
         nice)
 
-            grep -E '^Nice=' \
-                "${unit}" |
+            grep -E \
+                '^Nice=' \
+                "${unit}" 2>/dev/null |
                 cut -d= -f2 |
                 head -n1 ||
                 true
@@ -417,10 +482,11 @@ get_value_from_unit() {
             ;;
 
     esac
+
 }
 
 # ============================================================
-# MOSTRAR VALOR GLOBAL
+# VALOR GLOBAL
 # ============================================================
 
 get_global_value() {
@@ -465,10 +531,11 @@ get_global_value() {
         printf '%s' "NO CONFIGURADO"
 
     fi
+
 }
 
 # ============================================================
-# MOSTRAR CONFIGURACIÓN GLOBAL
+# CONFIGURACIÓN GLOBAL
 # ============================================================
 
 show_configuration() {
@@ -615,8 +682,14 @@ create_backups() {
     for service in "${SERVICES[@]}"; do
 
         unit="${SYSTEMD_DIR}/${service}"
-
         backup="${unit}.optimization-backup"
+
+        if [[ ! -f "${unit}" ]]; then
+
+            fail \
+                "No existe la unidad ${unit}."
+
+        fi
 
         spinner_start \
             "Respaldando ${service}..."
@@ -646,7 +719,34 @@ create_backups() {
 }
 
 # ============================================================
-# MODIFICAR PARÁMETROS EXECSTART
+# COMPROBAR SI EXECSTART TIENE PARÁMETRO
+# ============================================================
+
+exec_parameter_exists() {
+
+    local unit="$1"
+    local parameter="$2"
+
+    grep -qE \
+        -- "${parameter}[[:space:]]+[^[:space:]]+" \
+        "${unit}"
+
+}
+
+# ============================================================
+# MODIFICAR PARÁMETRO EXECSTART
+# ============================================================
+#
+# Si existe:
+#
+#   --max-download-frame 6144
+#
+# pasa a:
+#
+#   --max-download-frame 1500
+#
+# Si NO existe, lo añade al ExecStart.
+#
 # ============================================================
 
 replace_exec_parameter_in_unit() {
@@ -655,8 +755,65 @@ replace_exec_parameter_in_unit() {
     local parameter="$2"
     local value="$3"
 
-    sed -E -i \
-        "s#(${parameter}[[:space:]]+)[^[:space:]]+#\1${value}#g" \
+    if exec_parameter_exists \
+        "${unit}" \
+        "${parameter}"; then
+
+        sed -E -i \
+            "s#(${parameter}[[:space:]]+)[^[:space:]]+#\1${value}#g" \
+            "${unit}"
+
+        return 0
+    fi
+
+    # --------------------------------------------------------
+    # Parámetro inexistente.
+    #
+    # Se añade al ExecStart.
+    # Se contempla ExecStart en una sola línea o terminado
+    # con "\" para continuación.
+    # --------------------------------------------------------
+
+    awk \
+        -v parameter="${parameter}" \
+        -v value="${value}" '
+
+        BEGIN {
+            inserted = 0
+        }
+
+        {
+            if (!inserted && $0 ~ /^[[:space:]]*ExecStart=/) {
+
+                if ($0 ~ /\\[[:space:]]*$/) {
+
+                    sub(/[[:space:]]*\\[[:space:]]*$/, "")
+
+                    print $0 " " parameter " " value " \\"
+
+                } else {
+
+                    print $0 " " parameter " " value
+
+                }
+
+                inserted = 1
+
+                next
+            }
+
+            print
+        }
+
+        ' \
+        "${unit}" > "${unit}.tmp"
+
+    if [[ "${inserted:-0}" == "1" ]]; then
+        :
+    fi
+
+    mv -f \
+        "${unit}.tmp" \
         "${unit}"
 
 }
@@ -703,10 +860,26 @@ apply_exec_parameter_global() {
 
         unit="${SYSTEMD_DIR}/${service}"
 
-        replace_exec_parameter_in_unit \
+        if [[ ! -f "${unit}" ]]; then
+
+            error_message \
+                "No existe ${unit}."
+
+            return 1
+
+        fi
+
+        if ! replace_exec_parameter_in_unit \
             "${unit}" \
             "${parameter}" \
-            "${value}"
+            "${value}"; then
+
+            error_message \
+                "No se pudo modificar ${service}."
+
+            return 1
+
+        fi
 
         MODIFIED_FILES+=("${unit}")
 
@@ -730,10 +903,26 @@ apply_systemd_parameter_global() {
 
         unit="${SYSTEMD_DIR}/${service}"
 
-        replace_systemd_parameter_in_unit \
+        if [[ ! -f "${unit}" ]]; then
+
+            error_message \
+                "No existe ${unit}."
+
+            return 1
+
+        fi
+
+        if ! replace_systemd_parameter_in_unit \
             "${unit}" \
             "${parameter}" \
-            "${value}"
+            "${value}"; then
+
+            error_message \
+                "No se pudo modificar ${service}."
+
+            return 1
+
+        fi
 
         MODIFIED_FILES+=("${unit}")
 
@@ -762,6 +951,9 @@ change_max_frame() {
 
     info \
         "Valor recomendado: ${RECOMMENDED_MAX_DOWNLOAD_FRAME}"
+
+    info \
+        "Se aplicará a TODAS las instancias."
 
     printf '\n'
 
@@ -809,6 +1001,9 @@ change_poll_timeout() {
     info \
         "Valor recomendado: ${RECOMMENDED_DOWNLOAD_POLL_TIMEOUT}"
 
+    info \
+        "Se aplicará a TODAS las instancias."
+
     printf '\n'
 
     read -r \
@@ -854,6 +1049,9 @@ change_nofile() {
 
     info \
         "Valor recomendado: ${RECOMMENDED_LIMIT_NOFILE}"
+
+    info \
+        "Se aplicará a TODAS las instancias."
 
     printf '\n'
 
@@ -901,6 +1099,9 @@ change_tasks() {
     info \
         "Valor recomendado: ${RECOMMENDED_TASKS_MAX}"
 
+    info \
+        "Se aplicará a TODAS las instancias."
+
     printf '\n'
 
     read -r \
@@ -947,6 +1148,9 @@ change_memory() {
     info \
         "Valor recomendado: ${RECOMMENDED_MEMORY_MAX}"
 
+    info \
+        "Se aplicará a TODAS las instancias."
+
     printf '\n'
 
     read -r \
@@ -992,6 +1196,9 @@ change_swap() {
 
     info \
         "Valor recomendado: ${RECOMMENDED_MEMORY_SWAP_MAX}"
+
+    info \
+        "Se aplicará a TODAS las instancias."
 
     printf '\n'
 
@@ -1042,6 +1249,9 @@ change_nice() {
 
     info \
         "Valor recomendado: ${RECOMMENDED_NICE}"
+
+    info \
+        "Se aplicará a TODAS las instancias."
 
     printf '\n'
 
@@ -1105,12 +1315,12 @@ restore_recommended() {
         "${RECOMMENDED_NICE}"
 
     success \
-        "Valores recomendados aplicados a todas las instancias."
+        "Valores recomendados aplicados a TODAS las instancias."
 
 }
 
 # ============================================================
-# VALIDAR CONFIGURACIÓN SYSTEMD
+# VALIDAR UNIDADES
 # ============================================================
 
 validate_units() {
@@ -1199,6 +1409,8 @@ apply_changes() {
 
     fi
 
+    printf '\n'
+
     spinner_start \
         "Recargando configuración de systemd..."
 
@@ -1267,26 +1479,22 @@ apply_changes() {
 
     done
 
+    # --------------------------------------------------------
+    # SI UNA INSTANCIA FALLÓ
+    # --------------------------------------------------------
+
     if (( failed > 0 )); then
 
         warning \
             "Una o más instancias no pudieron iniciar correctamente."
 
         warning \
-            "Restaurando la configuración anterior..."
+            "Restaurando automáticamente la configuración anterior..."
 
         restore_backups
 
-        # ----------------------------------------------------
-        # RECARGAR SYSTEMD
-        # ----------------------------------------------------
-
         systemctl daemon-reload >/dev/null 2>&1 ||
             true
-
-        # ----------------------------------------------------
-        # RESTAURAR TODAS LAS INSTANCIAS
-        # ----------------------------------------------------
 
         for service in "${SERVICES[@]}"; do
 
@@ -1301,10 +1509,16 @@ apply_changes() {
 
     fi
 
+    # --------------------------------------------------------
+    # VERIFICACIÓN FINAL
+    # --------------------------------------------------------
+
     printf '\n'
 
     section \
         "VERIFICACIÓN FINAL"
+
+    failed=0
 
     for service in "${SERVICES[@]}"; do
 
@@ -1313,12 +1527,12 @@ apply_changes() {
             "${service}"; then
 
             success \
-                "${service}: activo."
+                "${service}: ACTIVO."
 
         else
 
             error_message \
-                "${service}: no está activo."
+                "${service}: NO ESTÁ ACTIVO."
 
             failed=$((failed + 1))
 
@@ -1328,15 +1542,19 @@ apply_changes() {
 
     if (( failed > 0 )); then
 
-        fail \
-            "Una o más instancias no quedaron activas."
+        warning \
+            "La verificación final detectó instancias inactivas."
+
+        return 1
 
     fi
 
     printf '\n'
 
     success \
-        "La configuración fue aplicada correctamente a todas las instancias."
+        "La configuración fue aplicada correctamente a TODAS las instancias."
+
+    return 0
 
 }
 
@@ -1352,13 +1570,7 @@ execute_change() {
 
     MODIFIED_FILES=()
 
-    if "${function_name}"; then
-
-        if ! apply_changes; then
-            return 1
-        fi
-
-    else
+    if ! "${function_name}"; then
 
         warning \
             "No se realizaron cambios."
@@ -1367,7 +1579,14 @@ execute_change() {
 
     fi
 
+    if ! apply_changes; then
+
+        return 1
+
+    fi
+
     return 0
+
 }
 
 # ============================================================
@@ -1385,20 +1604,28 @@ show_instances() {
 
         local port
 
-        port="${service#${SERVICE_PREFIX}}"
-        port="${port%.service}"
+        if [[ "${service}" == "hcr-server.service" ]]; then
+
+            port="principal"
+
+        else
+
+            port="${service#${SERVICE_PREFIX}}"
+            port="${port%.service}"
+
+        fi
 
         if systemctl is-active \
             --quiet \
             "${service}"; then
 
             success \
-                "Puerto ${port} → ${service} → ACTIVO"
+                "${port} → ${service} → ACTIVO"
 
         else
 
             warning \
-                "Puerto ${port} → ${service} → INACTIVO"
+                "${port} → ${service} → INACTIVO"
 
         fi
 
@@ -1581,10 +1808,12 @@ menu() {
 
                 MODIFIED_FILES=()
 
-                restore_recommended
+                if restore_recommended; then
 
-                apply_changes ||
-                    true
+                    apply_changes ||
+                        true
+
+                fi
 
                 printf '\n'
 
