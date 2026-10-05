@@ -4,26 +4,25 @@ set -euo pipefail
 # ============================================================
 # HCR SERVER — PREMIUM CONTROL PANEL
 # ============================================================
-# Panel compatible con:
+# Panel principal de administración HCR Server.
 #
-#   hcr-server.service
-#   hcr-server-XXXX.service
-#
-# Permite administrar múltiples instancias HCR Server.
-#
-# FUNCIONES:
+# OPCIONES:
 #
 #   01  Instalar / reinstalar
 #   02  Desinstalar
 #   03  Gestión de puertos
-#   04  Estados de puerto
-#   05  Iniciar / Detener Servicio
-#   06  Reiniciar Servicio
-#   07  Optimizar HCR
+#   04  Estados de puertos
+#   05  Optimizar HCR
+#   06  Iniciar / Detener Servicio
+#   07  Reiniciar Servicio
 #
 # ============================================================
 
 set +e
+
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
 
 BASE_URL="https://raw.githubusercontent.com/ChristopherAGT/hcr-server/main"
 
@@ -36,14 +35,19 @@ CERT_PATH="${INSTALL_DIR}/fullchain.pem"
 KEY_PATH="${INSTALL_DIR}/privkey.pem"
 
 UNINSTALL_SCRIPT="${TEMP_DIR}/uninstall.sh"
+
+START_STOP_PORT_SCRIPT="${TEMP_DIR}/start-stop-port.sh"
 ADD_PORT_SCRIPT="${TEMP_DIR}/add-port.sh"
 CHANGE_PORT_SCRIPT="${TEMP_DIR}/change-port.sh"
 DELETE_PORT_SCRIPT="${TEMP_DIR}/delete-port.sh"
-OPTIMIZE_SCRIPT="${TEMP_DIR}/optimize-port.sh"
-RESTART_SCRIPT="${TEMP_DIR}/restart-port.sh"
+
+STATUS_PORT_SCRIPT="${TEMP_DIR}/status-port.sh"
+OPTIMIZE_SCRIPT="${TEMP_DIR}/optimize.sh"
+
+START_STOP_SERVICE_SCRIPT="${TEMP_DIR}/start-stop-service.sh"
+RESTART_SERVICE_SCRIPT="${TEMP_DIR}/restart-service.sh"
 
 SYSTEMD_DIR="/etc/systemd/system"
-SERVICE_NAME="hcr-server"
 
 SPINNER_PID=""
 
@@ -131,28 +135,17 @@ prepare_install_dir() {
 # ============================================================
 # SPINNER
 # ============================================================
-# CORREGIDO:
-#
-# - Detecta si existe un spinner anterior.
-# - Si el PID anterior ya murió, limpia la variable.
-# - Usa TERM para cerrar correctamente el proceso.
-# - El proceso del spinner tiene trap para terminar limpiamente.
-# - spinner_stop espera al proceso antes de continuar.
-# - Limpia completamente la línea anterior.
-# ============================================================
 
 spinner_start() {
 
     local message="${1:-Procesando}"
 
-    # Si existe un PID anterior, comprobar si sigue vivo.
     if [[ -n "${SPINNER_PID:-}" ]]; then
 
         if kill -0 "${SPINNER_PID}" >/dev/null 2>&1; then
             return 0
         fi
 
-        # El proceso anterior ya no existe.
         SPINNER_PID=""
     fi
 
@@ -182,21 +175,15 @@ spinner_stop() {
 
     local pid="${SPINNER_PID:-}"
 
-    # Limpiar inmediatamente el PID para impedir
-    # que otro spinner reutilice un proceso viejo.
     SPINNER_PID=""
 
     if [[ -n "$pid" ]]; then
 
-        # TERM permite que el trap del spinner cierre
-        # correctamente el proceso.
         kill -TERM "$pid" >/dev/null 2>&1 || true
 
-        # Esperar a que realmente termine.
         wait "$pid" >/dev/null 2>&1 || true
     fi
 
-    # Limpiar completamente la línea del spinner.
     printf "\r\033[2K"
 }
 
@@ -262,79 +249,6 @@ hcr_is_installed() {
 }
 
 # ============================================================
-# LISTAR PUERTOS
-# ============================================================
-
-get_hcr_ports() {
-
-    local units
-    local unit
-    local path
-    local port
-
-    units="$(get_hcr_units)"
-
-    [[ -n "$units" ]] || return 0
-
-    while IFS= read -r unit; do
-
-        [[ -n "$unit" ]] || continue
-
-        path="$(get_unit_path "$unit")"
-        port="$(get_unit_listen_port "$unit" "$path")"
-
-        if [[ -n "$port" ]]; then
-            echo "$port"
-        fi
-
-    done <<< "$units" |
-    sort -n -u
-}
-
-# ============================================================
-# HEADER
-# ============================================================
-
-header() {
-
-    clear_screen
-
-    local count
-    local installed
-    local ports
-    local port_line
-
-    count="$(count_hcr_instances)"
-
-    if hcr_is_installed; then
-        installed="${GREEN}Instalado${RESET} 🟢"
-    else
-        installed="${RED}No Instalado${RESET} 🔴"
-    fi
-
-    ports="$(get_hcr_ports | paste -sd ', ' -)"
-
-    if [[ -z "$ports" ]]; then
-        port_line="${GRAY}---${RESET}"
-    else
-        port_line="${WHITE}${ports}${RESET}"
-    fi
-
-    echo
-    echo -e "${CYAN}    ╭────────────────────────────────────────────────────────╮${RESET}"
-    echo -e "${CYAN}    │                                                        │${RESET}"
-    echo -e "${CYAN}    │${BOLD}${WHITE}       H C R   S E R V E R${RESET}                              ${CYAN}│${RESET}"
-    echo -e "${CYAN}    │${GRAY}       Premium Control Panel${RESET}                            ${CYAN}│${RESET}"
-    echo -e "${CYAN}    │                                                        │${RESET}"
-    echo -e "${CYAN}    ├────────────────────────────────────────────────────────┤${RESET}"
-    echo -e "${CYAN}    │${RESET}  ${WHITE}HCR:${RESET} ${installed}                                      ${CYAN}│${RESET}"
-    echo -e "${CYAN}    │${RESET}  ${WHITE}Instancias HCR:${RESET} ${GREEN}${count}${RESET}                                ${CYAN}│${RESET}"
-    echo -e "${CYAN}    │${RESET}  ${WHITE}Puertos:${RESET} ${port_line}                              ${CYAN}│${RESET}"
-    echo -e "${CYAN}    ╰────────────────────────────────────────────────────────╯${RESET}"
-    echo
-}
-
-# ============================================================
 # RUTA DE UNIDAD
 # ============================================================
 
@@ -390,342 +304,96 @@ get_unit_listen_port() {
 }
 
 # ============================================================
-# OBTENER PUERTO DESTINO
+# LISTAR PUERTOS PARA EL ENCABEZADO
 # ============================================================
 
-get_unit_target_port() {
+get_hcr_ports() {
 
-    local unit="$1"
-    local path="$2"
-
-    if [[ -z "$path" || ! -f "$path" ]]; then
-        return 0
-    fi
-
-    grep -oE \
-        -- '--target[[:space:]]+127\.0\.0\.1:[0-9]+' \
-        "$path" 2>/dev/null |
-        grep -oE '[0-9]+$' |
-        head -n1 || true
-}
-
-# ============================================================
-# OBTENER TRANSPORTE
-# ============================================================
-
-get_unit_transport() {
-
-    local path="$1"
-
-    if [[ -z "$path" || ! -f "$path" ]]; then
-        echo "---"
-        return
-    fi
-
-    grep -oE \
-        -- '--transport[[:space:]]+[a-zA-Z0-9_-]+' \
-        "$path" 2>/dev/null |
-        awk '{print $2}' |
-        head -n1 || true
-}
-
-# ============================================================
-# OBTENER DOWNLOAD FRAME
-# ============================================================
-
-get_unit_frame() {
-
-    local path="$1"
-
-    if [[ -z "$path" || ! -f "$path" ]]; then
-        echo "---"
-        return
-    fi
-
-    grep -oE \
-        -- '--max-download-frame[[:space:]]+[0-9]+' \
-        "$path" 2>/dev/null |
-        grep -oE '[0-9]+$' |
-        head -n1 || true
-}
-
-# ============================================================
-# OBTENER POLL TIMEOUT
-# ============================================================
-
-get_unit_timeout() {
-
-    local path="$1"
-
-    if [[ -z "$path" || ! -f "$path" ]]; then
-        echo "---"
-        return
-    fi
-
-    grep -oE \
-        -- '--download-poll-timeout[[:space:]]+[0-9]+(ms|s|m|h)' \
-        "$path" 2>/dev/null |
-        grep -oE '[0-9]+(ms|s|m|h)$' |
-        head -n1 || true
-}
-
-# ============================================================
-# ESTADO SYSTEMD
-# ============================================================
-
-get_unit_state() {
-
-    local unit="$1"
-
-    systemctl is-active "$unit" 2>/dev/null || true
-}
-
-# ============================================================
-# COMPROBAR LISTENER
-# ============================================================
-
-is_port_listening() {
-
-    local port="$1"
-
-    [[ -n "$port" ]] || return 1
-
-    ss -H -lnt 2>/dev/null |
-        awk -v port="$port" '
-            {
-                if ($4 ~ (":" port "$")) {
-                    found=1
-                    exit
-                }
-            }
-
-            END {
-                if (found)
-                    exit 0
-
-                exit 1
-            }
-        '
-}
-
-# ============================================================
-# ESTADO REAL
-# ============================================================
-
-get_port_state() {
-
-    local unit="$1"
-    local path="$2"
-
-    local systemd_state
+    local unit
+    local path
     local port
 
-    systemd_state="$(get_unit_state "$unit")"
-    port="$(get_unit_listen_port "$unit" "$path")"
+    while IFS= read -r unit; do
 
-    if [[ "$systemd_state" == "active" ]]; then
+        [[ -n "$unit" ]] || continue
 
-        if is_port_listening "$port"; then
-            echo "ACTIVO"
-        else
-            echo "SIN ESCUCHA"
-        fi
+        path="$(get_unit_path "$unit")"
 
-    elif [[ "$systemd_state" == "failed" ]]; then
+        port="$(get_unit_listen_port "$unit" "$path")"
 
-        echo "ERROR"
+        [[ -n "$port" ]] || continue
 
+        echo "$port"
+
+    done < <(get_hcr_units) |
+    sort -n -u
+}
+
+# ============================================================
+# ENCABEZADO PRINCIPAL
+# ============================================================
+#
+# IMPORTANTE:
+#
+# Este es el ÚNICO encabezado visual del panel.
+#
+# NO muestra:
+#
+#   INSTANCIAS HCR SERVER
+#   tablas
+#   FRAME
+#   TIMEOUT
+#   TRANSPORTE
+#
+# Únicamente muestra:
+#
+#   HCR
+#   Instancias HCR
+#   Puertos
+#
+# ============================================================
+
+header() {
+
+    clear_screen
+
+    local count
+    local installed
+    local ports
+    local port_line
+
+    count="$(count_hcr_instances)"
+
+    if hcr_is_installed; then
+        installed="${GREEN}Instalado${RESET} 🟢"
     else
-
-        echo "DETENIDO"
-    fi
-}
-
-# ============================================================
-# TABLA DE INSTANCIAS
-# ============================================================
-
-show_instances() {
-
-    local units
-    units="$(get_hcr_units)"
-
-    echo -e "  ${BOLD}${WHITE}INSTANCIAS HCR SERVER${RESET}"
-    echo
-
-    if [[ -z "$units" ]]; then
-
-        warning "No se detectaron instancias HCR Server."
-        echo
-        return 1
+        installed="${RED}No Instalado${RESET} 🔴"
     fi
 
-    printf "  ${GRAY}%-4s %-12s %-14s %-14s %-10s %-10s %-10s${RESET}\n" \
-        "#" \
-        "PUERTO" \
-        "DESTINO" \
-        "ESTADO" \
-        "FRAME" \
-        "TIMEOUT" \
-        "TRANSP."
+    ports="$(get_hcr_ports | paste -sd ',' -)"
 
-    line
-
-    local index=0
-    local unit
-    local path
-    local port
-    local target
-    local state
-    local frame
-    local timeout
-    local transport
-    local state_display
-
-    while IFS= read -r unit; do
-
-        [[ -n "$unit" ]] || continue
-
-        index=$((index + 1))
-
-        path="$(get_unit_path "$unit")"
-
-        port="$(get_unit_listen_port "$unit" "$path")"
-        target="$(get_unit_target_port "$unit" "$path")"
-        state="$(get_port_state "$unit" "$path")"
-        frame="$(get_unit_frame "$path")"
-        timeout="$(get_unit_timeout "$path")"
-        transport="$(get_unit_transport "$path")"
-
-        case "$state" in
-
-            ACTIVO)
-                state_display="${GREEN}ACTIVO${RESET}"
-                ;;
-
-            SIN\ ESCUCHA)
-                state_display="${YELLOW}SIN ESCUCHA${RESET}"
-                ;;
-
-            ERROR)
-                state_display="${RED}ERROR${RESET}"
-                ;;
-
-            *)
-                state_display="${GRAY}DETENIDO${RESET}"
-                ;;
-        esac
-
-        printf "  ${CYAN}%-4s${RESET} ${WHITE}%-12s${RESET} ${WHITE}%-14s${RESET} %-14b ${WHITE}%-10s${RESET} ${WHITE}%-10s${RESET} ${WHITE}%-10s${RESET}\n" \
-            "$index" \
-            "${port:----}" \
-            "${target:----}" \
-            "$state_display" \
-            "${frame:----}" \
-            "${timeout:----}" \
-            "${transport:----}"
-
-    done <<< "$units"
-
-    echo
-    detail "Destino = redirección local 127.0.0.1:PUERTO"
-    detail "ACTIVO = systemd activo y puerto realmente escuchando."
-}
-
-# ============================================================
-# SELECCIONAR UNIDAD
-# ============================================================
-
-select_hcr_unit() {
-
-    local title="${1:-Seleccionar instancia}"
-    local units
-    units="$(get_hcr_units)"
-
-    if [[ -z "$units" ]]; then
-
-        warning "No existen instancias HCR Server disponibles."
-        return 1
+    if [[ -z "$ports" ]]; then
+        port_line="${GRAY}---${RESET}"
+    else
+        port_line="${WHITE}${ports}${RESET}"
     fi
 
     echo
-    echo -e "  ${BOLD}${WHITE}${title}${RESET}"
+    echo -e "${CYAN}    ╭────────────────────────────────────────────────────────╮${RESET}"
+    echo -e "${CYAN}    │                                                        │${RESET}"
+    echo -e "${CYAN}    │       ${BOLD}${WHITE}H C R   S E R V E R${RESET}                              ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │       ${GRAY}Premium Control Panel${RESET}                            ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │                                                        │${RESET}"
+    echo -e "${CYAN}    ├────────────────────────────────────────────────────────┤${RESET}"
+    echo -e "${CYAN}    │${RESET}  ${WHITE}HCR:${RESET} ${installed}                                      ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │${RESET}  ${WHITE}Instancias HCR:${RESET} ${GREEN}${count}${RESET}                                ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │${RESET}  ${WHITE}Puertos:${RESET} ${port_line}                              ${CYAN}│${RESET}"
+    echo -e "${CYAN}    ╰────────────────────────────────────────────────────────╯${RESET}"
     echo
-
-    local index=0
-    local unit
-    local path
-    local port
-    local state
-    local state_display
-
-    declare -a UNIT_ARRAY
-
-    while IFS= read -r unit; do
-
-        [[ -n "$unit" ]] || continue
-
-        index=$((index + 1))
-
-        UNIT_ARRAY[$index]="$unit"
-
-        path="$(get_unit_path "$unit")"
-        port="$(get_unit_listen_port "$unit" "$path")"
-        state="$(get_port_state "$unit" "$path")"
-
-        case "$state" in
-            ACTIVO)
-                state_display="${GREEN}ACTIVO${RESET}"
-                ;;
-            SIN\ ESCUCHA)
-                state_display="${YELLOW}SIN ESCUCHA${RESET}"
-                ;;
-            ERROR)
-                state_display="${RED}ERROR${RESET}"
-                ;;
-            *)
-                state_display="${GRAY}DETENIDO${RESET}"
-                ;;
-        esac
-
-        printf "  ${CYAN}%02d${RESET}  ${WHITE}Puerto %-6s${RESET} ${GRAY}%-28s${RESET} %b\n" \
-            "$index" \
-            "${port:----}" \
-            "(${unit})" \
-            "$state_display"
-
-    done <<< "$units"
-
-    echo
-    echo -e "  ${GRAY}00  Cancelar${RESET}"
-    echo
-
-    local option
-
-    while true; do
-
-        read -rp "  Selecciona una instancia: " option
-
-        if [[ "$option" == "0" || "$option" == "00" ]]; then
-            return 1
-        fi
-
-        if [[ "$option" =~ ^[0-9]+$ ]] &&
-           (( option >= 1 && option <= index )); then
-
-            SELECTED_UNIT="${UNIT_ARRAY[$option]}"
-            SELECTED_PATH="$(get_unit_path "$SELECTED_UNIT")"
-            SELECTED_PORT="$(get_unit_listen_port "$SELECTED_UNIT" "$SELECTED_PATH")"
-
-            return 0
-        fi
-
-        error "Selección no válida."
-    done
 }
 
 # ============================================================
-# DESCARGA GENÉRICA
+# DESCARGAR ARCHIVO
 # ============================================================
 
 download_file() {
@@ -733,13 +401,27 @@ download_file() {
     local url="$1"
     local destination="$2"
 
-    curl -fL \
+    prepare_install_dir
+
+    if ! curl -fL \
         --retry 3 \
         --connect-timeout 15 \
         --max-time 120 \
         -sS \
         "$url" \
-        -o "${destination}.download"
+        -o "${destination}.download"; then
+
+        rm -f "${destination}.download"
+
+        return 1
+    fi
+
+    if [[ ! -s "${destination}.download" ]]; then
+
+        rm -f "${destination}.download"
+
+        return 1
+    fi
 
     chmod 700 "${destination}.download"
     chown root:root "${destination}.download"
@@ -761,6 +443,8 @@ run_remote() {
 
     prepare_install_dir
 
+    echo
+
     spinner_start "Descargando ${name}..."
 
     if ! curl -fL \
@@ -769,22 +453,43 @@ run_remote() {
         --max-time 120 \
         -sS \
         "$url" \
-        -o "$path"; then
+        -o "${path}.download"; then
 
         spinner_stop
+
+        rm -f "${path}.download"
 
         error "No se pudo descargar ${name}."
 
         return 1
     fi
 
-    chmod 700 "$path"
-    chown root:root "$path"
-
     spinner_stop
+
+    if [[ ! -s "${path}.download" ]]; then
+
+        rm -f "${path}.download"
+
+        error "El archivo descargado está vacío."
+
+        return 1
+    fi
+
+    chmod 700 "${path}.download"
+    chown root:root "${path}.download"
+
+    mv -f \
+        "${path}.download" \
+        "$path"
+
+    echo
+
+    spinner_start "Ejecutando ${name}..."
 
     bash "$path"
     local result=$?
+
+    spinner_stop
 
     rm -f "$path"
 
@@ -821,7 +526,7 @@ prepare_certificates() {
 
     rm -f "$temp_key" "$temp_cert"
 
-    openssl req \
+    if ! openssl req \
         -x509 \
         -newkey rsa:2048 \
         -sha256 \
@@ -830,7 +535,14 @@ prepare_certificates() {
         -keyout "$temp_key" \
         -out "$temp_cert" \
         -subj "/CN=hcr-server-temporary" \
-        >/dev/null 2>&1
+        >/dev/null 2>&1; then
+
+        rm -f "$temp_key" "$temp_cert"
+
+        error "No se pudo generar el certificado temporal."
+
+        return 1
+    fi
 
     chown root:root "$temp_key" "$temp_cert"
 
@@ -841,6 +553,8 @@ prepare_certificates() {
     mv -f "$temp_cert" "$CERT_PATH"
 
     success "Certificado temporal generado."
+
+    return 0
 }
 
 # ============================================================
@@ -855,35 +569,48 @@ prepare_installation() {
 
     info "Descargando instalador..."
 
-    download_file \
+    if ! download_file \
         "${BASE_URL}/install.sh" \
-        "$INSTALL_SCRIPT"
+        "$INSTALL_SCRIPT"; then
+
+        error "No se pudo descargar install.sh."
+
+        return 1
+    fi
 
     chmod 700 "$INSTALL_SCRIPT"
 
-    info "Descargando binario..."
-
-    download_file \
-        "${BASE_URL}/hcr-server" \
-        "$BINARY_PATH"
-
-    chmod 700 "$BINARY_PATH"
-
-    prepare_certificates
+    success "Instalador descargado."
 
     echo
 
-    [[ -s "$INSTALL_SCRIPT" ]] ||
-        return 1
+    info "Descargando binario..."
 
-    [[ -s "$BINARY_PATH" ]] ||
-        return 1
+    if ! download_file \
+        "${BASE_URL}/hcr-server" \
+        "$BINARY_PATH"; then
 
-    [[ -s "$CERT_PATH" ]] ||
-        return 1
+        error "No se pudo descargar el binario HCR Server."
 
-    [[ -s "$KEY_PATH" ]] ||
         return 1
+    fi
+
+    chmod 700 "$BINARY_PATH"
+
+    success "Binario descargado."
+
+    echo
+
+    if ! prepare_certificates; then
+        return 1
+    fi
+
+    echo
+
+    [[ -s "$INSTALL_SCRIPT" ]] || return 1
+    [[ -s "$BINARY_PATH" ]] || return 1
+    [[ -s "$CERT_PATH" ]] || return 1
+    [[ -s "$KEY_PATH" ]] || return 1
 
     chown root:root \
         "$INSTALL_SCRIPT" \
@@ -891,15 +618,20 @@ prepare_installation() {
         "$CERT_PATH" \
         "$KEY_PATH"
 
-    chmod 700 "$INSTALL_SCRIPT" "$BINARY_PATH"
+    chmod 700 \
+        "$INSTALL_SCRIPT" \
+        "$BINARY_PATH"
+
     chmod 644 "$CERT_PATH"
     chmod 600 "$KEY_PATH"
 
     success "Paquete de instalación preparado correctamente."
+
+    return 0
 }
 
 # ============================================================
-# INSTALAR
+# OPCIÓN 1 — INSTALAR
 # ============================================================
 
 install_service() {
@@ -940,7 +672,7 @@ install_service() {
 }
 
 # ============================================================
-# DESINSTALAR
+# OPCIÓN 2 — DESINSTALAR
 # ============================================================
 
 uninstall_service() {
@@ -972,15 +704,23 @@ uninstall_service() {
     run_remote \
         "desinstalador" \
         "${BASE_URL}/uninstall.sh" \
-        "$UNINSTALL_SCRIPT" || true
+        "$UNINSTALL_SCRIPT"
+
+    local result=$?
 
     echo
+
+    if (( result == 0 )); then
+        success "Desinstalación finalizada."
+    else
+        error "El desinstalador terminó con errores."
+    fi
 
     pause
 }
 
 # ============================================================
-# GESTIÓN DE PUERTOS
+# OPCIÓN 3 — GESTIÓN DE PUERTOS
 # ============================================================
 
 port_management_menu() {
@@ -990,27 +730,23 @@ port_management_menu() {
         header
 
         echo -e "  ${BOLD}${WHITE}GESTIÓN DE PUERTOS${RESET}"
-        echo -e "  ${GRAY}Administración individual de las instancias HCR.${RESET}"
+        echo -e "  ${GRAY}Administración de las instancias HCR Server.${RESET}"
         echo
 
-        show_instances
-
+        echo -e "  ${CYAN}01${RESET}  ${MAGENTA}↕${RESET}  ${WHITE}Iniciar / Detener Puerto${RESET}"
+        echo -e "      ${GRAY}Inicia o detiene una instancia HCR${RESET}"
         echo
 
-        echo -e "  ${CYAN}01${RESET}  ${MAGENTA}＋${RESET}  ${WHITE}Añadir puerto${RESET}"
-        echo -e "      ${GRAY}Crear una nueva instancia HCR${RESET}"
+        echo -e "  ${CYAN}02${RESET}  ${MAGENTA}＋${RESET}  ${WHITE}Añadir Puerto${RESET}"
+        echo -e "      ${GRAY}Crea una nueva instancia HCR${RESET}"
         echo
 
-        echo -e "  ${CYAN}02${RESET}  ${MAGENTA}■${RESET}  ${WHITE}Detener puerto${RESET}"
-        echo -e "      ${GRAY}Detener una instancia sin eliminarla${RESET}"
+        echo -e "  ${CYAN}03${RESET}  ${MAGENTA}✎${RESET}  ${WHITE}Modificar Puerto${RESET}"
+        echo -e "      ${GRAY}Modifica la configuración de una instancia${RESET}"
         echo
 
-        echo -e "  ${CYAN}03${RESET}  ${MAGENTA}✎${RESET}  ${WHITE}Modificar puerto${RESET}"
-        echo -e "      ${GRAY}Cambiar puerto HCR o puerto destino${RESET}"
-        echo
-
-        echo -e "  ${CYAN}04${RESET}  ${MAGENTA}✖${RESET}  ${WHITE}Eliminar puerto${RESET}"
-        echo -e "      ${GRAY}Eliminar completamente una instancia${RESET}"
+        echo -e "  ${CYAN}04${RESET}  ${MAGENTA}✖${RESET}  ${WHITE}Eliminar Puerto${RESET}"
+        echo -e "      ${GRAY}Elimina completamente una instancia${RESET}"
         echo
 
         line
@@ -1027,28 +763,60 @@ port_management_menu() {
         case "$option" in
 
             1|01)
-                add_port
+
+                run_remote \
+                    "gestor de inicio / detención de puerto" \
+                    "${BASE_URL}/start-stop-port.sh" \
+                    "$START_STOP_PORT_SCRIPT"
+
+                echo
+                pause
                 ;;
 
             2|02)
-                stop_port
+
+                run_remote \
+                    "gestor de nuevos puertos" \
+                    "${BASE_URL}/add-port.sh" \
+                    "$ADD_PORT_SCRIPT"
+
+                echo
+                pause
                 ;;
 
             3|03)
-                modify_port
+
+                run_remote \
+                    "gestor de modificación de puerto" \
+                    "${BASE_URL}/change-port.sh" \
+                    "$CHANGE_PORT_SCRIPT"
+
+                echo
+                pause
                 ;;
 
             4|04)
-                delete_port
+
+                run_remote \
+                    "eliminador de puerto" \
+                    "${BASE_URL}/delete-port.sh" \
+                    "$DELETE_PORT_SCRIPT"
+
+                echo
+                pause
                 ;;
 
             0|00)
+
                 return
                 ;;
 
             *)
+
                 echo
+
                 error "Opción no válida."
+
                 sleep 1
                 ;;
 
@@ -1058,292 +826,74 @@ port_management_menu() {
 }
 
 # ============================================================
-# AÑADIR PUERTO
+# OPCIÓN 4 — ESTADOS DE PUERTOS
+# ============================================================
+#
+# IMPORTANTE:
+#
+# NO se muestra ninguna tabla.
+#
+# NO se llama a show_instances.
+#
+# Se conserva únicamente el encabezado principal.
+#
 # ============================================================
 
-add_port() {
+status_ports() {
 
     header
 
-    echo -e "  ${BOLD}${WHITE}AÑADIR PUERTO${RESET}"
-    echo -e "  ${GRAY}Crea una nueva instancia HCR Server.${RESET}"
+    echo -e "  ${BOLD}${WHITE}ESTADOS DE PUERTOS${RESET}"
+    echo -e "  ${GRAY}Consulta el estado general de las instancias HCR Server.${RESET}"
     echo
 
-    run_remote \
-        "gestor de nuevos puertos" \
-        "${BASE_URL}/add-port.sh" \
-        "$ADD_PORT_SCRIPT" || true
+    local units
+    units="$(get_hcr_units)"
 
-    echo
+    if [[ -z "$units" ]]; then
 
-    pause
-}
-
-# ============================================================
-# DETENER PUERTO
-# ============================================================
-
-stop_port() {
-
-    header
-
-    echo -e "  ${BOLD}${WHITE}DETENER PUERTO${RESET}"
-    echo -e "  ${GRAY}Detiene únicamente la instancia seleccionada.${RESET}"
-    echo
-
-    if ! select_hcr_unit "Selecciona el puerto que deseas detener"; then
-
-        info "Operación cancelada."
-
-        pause
-
-        return
-    fi
-
-    local unit="$SELECTED_UNIT"
-    local port="$SELECTED_PORT"
-
-    echo
-
-    detail "Servicio: $unit"
-    detail "Puerto: ${port:-desconocido}"
-
-    echo
-
-    warning "El puerto será detenido, pero la instancia no será eliminada."
-
-    echo
-
-    read -rp "  ¿Deseas continuar? [s/N]: " answer
-
-    case "${answer,,}" in
-
-        s|si|sí|y|yes)
-            ;;
-        *)
-            info "Operación cancelada."
-            pause
-            return
-            ;;
-    esac
-
-    echo
-
-    spinner_start "Deteniendo puerto ${port:-seleccionado}..."
-
-    if systemctl stop "$unit"; then
-
-        spinner_stop
-
-        success "Instancia detenida."
+        warning "No se detectaron instancias HCR Server."
 
     else
 
-        spinner_stop
+        local active=0
+        local stopped=0
+        local failed=0
+        local unit
+        local state
 
-        error "No se pudo detener la instancia."
+        while IFS= read -r unit; do
 
-        pause
+            [[ -n "$unit" ]] || continue
 
-        return
+            state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+
+            case "$state" in
+
+                active)
+                    active=$((active + 1))
+                    ;;
+
+                failed)
+                    failed=$((failed + 1))
+                    ;;
+
+                *)
+                    stopped=$((stopped + 1))
+                    ;;
+
+            esac
+
+        done <<< "$units"
+
+        echo -e "  ${WHITE}Estado general:${RESET}"
+        echo
+
+        echo -e "      ${GREEN}●${RESET} Activas:   ${GREEN}${active}${RESET}"
+        echo -e "      ${GRAY}●${RESET} Detenidas: ${GRAY}${stopped}${RESET}"
+        echo -e "      ${RED}●${RESET} Error:     ${RED}${failed}${RESET}"
+
     fi
-
-    echo
-
-    if is_port_listening "$port"; then
-
-        error "El puerto ${port} todavía aparece escuchando."
-
-    else
-
-        success "El puerto ${port} ya no está escuchando."
-
-    fi
-
-    pause
-}
-
-# ============================================================
-# INICIAR / DETENER SERVICIO
-# ============================================================
-
-toggle_service() {
-
-    header
-
-    echo -e "  ${BOLD}${WHITE}INICIAR / DETENER SERVICIO${RESET}"
-    echo -e "  ${GRAY}Inicia o detiene una instancia HCR según su estado actual.${RESET}"
-    echo
-
-    if ! select_hcr_unit "Selecciona la instancia que deseas iniciar o detener"; then
-
-        info "Operación cancelada."
-
-        pause
-
-        return
-    fi
-
-    local unit="$SELECTED_UNIT"
-    local path="$SELECTED_PATH"
-    local port="$SELECTED_PORT"
-
-    local current_state
-
-    current_state="$(get_unit_state "$unit")"
-
-    echo
-
-    detail "Servicio: ${unit}"
-    detail "Puerto: ${port:----}"
-
-    echo
-
-    if [[ "$current_state" == "active" ]]; then
-
-        warning "La instancia está actualmente ACTIVA."
-        echo
-
-        read -rp "  ¿Deseas detenerla? [s/N]: " answer
-
-        case "${answer,,}" in
-            s|si|sí|y|yes)
-                ;;
-            *)
-                info "Operación cancelada."
-                pause
-                return
-                ;;
-        esac
-
-        echo
-
-        spinner_start "Deteniendo ${unit}..."
-
-        if systemctl stop "$unit" >/dev/null 2>&1; then
-
-            spinner_stop
-
-            success "Servicio detenido correctamente."
-
-        else
-
-            spinner_stop
-
-            error "No se pudo detener ${unit}."
-
-            pause
-            return
-        fi
-
-        echo
-
-        if is_port_listening "$port"; then
-            error "El puerto ${port} todavía aparece escuchando."
-        else
-            success "El puerto ${port} ya no está escuchando."
-        fi
-
-    else
-
-        warning "La instancia está actualmente DETENIDA."
-        echo
-
-        read -rp "  ¿Deseas iniciarla? [s/N]: " answer
-
-        case "${answer,,}" in
-            s|si|sí|y|yes)
-                ;;
-            *)
-                info "Operación cancelada."
-                pause
-                return
-                ;;
-        esac
-
-        echo
-
-        spinner_start "Iniciando ${unit}..."
-
-        if systemctl daemon-reload >/dev/null 2>&1 &&
-           systemctl start "$unit" >/dev/null 2>&1; then
-
-            spinner_stop
-
-            success "Servicio iniciado correctamente."
-
-        else
-
-            spinner_stop
-
-            error "No se pudo iniciar ${unit}."
-
-            echo
-
-            systemctl \
-                --no-pager \
-                --full \
-                status "$unit" 2>&1 || true
-
-            pause
-            return
-        fi
-
-        echo
-
-        sleep 1
-
-        if systemctl is-active --quiet "$unit"; then
-            success "systemd confirma que la instancia está activa."
-        else
-            error "La instancia no quedó activa."
-        fi
-
-        if is_port_listening "$port"; then
-            success "El puerto ${port} está escuchando correctamente."
-        else
-            warning "La instancia está activa, pero el puerto ${port} no aparece escuchando."
-        fi
-    fi
-
-    pause
-}
-
-# ============================================================
-# MODIFICAR PUERTO
-# ============================================================
-
-modify_port() {
-
-    header
-
-    echo -e "  ${BOLD}${WHITE}MODIFICAR PUERTO${RESET}"
-    echo -e "  ${GRAY}Cambia el puerto HCR o el puerto destino de una instancia.${RESET}"
-    echo
-
-    if ! select_hcr_unit "Selecciona la instancia que deseas modificar"; then
-
-        info "Operación cancelada."
-
-        pause
-
-        return
-    fi
-
-    local selected_unit="$SELECTED_UNIT"
-    local selected_port="$SELECTED_PORT"
-
-    echo
-
-    detail "Instancia: ${selected_unit}"
-    detail "Puerto HCR: ${selected_port:-desconocido}"
-
-    echo
-
-    run_remote \
-        "gestor de modificación de puerto" \
-        "${BASE_URL}/change-port.sh" \
-        "$CHANGE_PORT_SCRIPT" || true
 
     echo
 
@@ -1351,117 +901,7 @@ modify_port() {
 }
 
 # ============================================================
-# ELIMINAR PUERTO
-# ============================================================
-
-delete_port() {
-
-    header
-
-    echo -e "  ${BOLD}${WHITE}ELIMINAR PUERTO${RESET}"
-    echo -e "  ${GRAY}Elimina completamente una instancia HCR Server.${RESET}"
-    echo
-
-    if ! select_hcr_unit "Selecciona la instancia que deseas eliminar"; then
-
-        info "Operación cancelada."
-
-        pause
-
-        return
-    fi
-
-    local selected_unit="$SELECTED_UNIT"
-    local selected_port="$SELECTED_PORT"
-
-    echo
-
-    detail "Instancia: ${selected_unit}"
-    detail "Puerto HCR: ${selected_port:-desconocido}"
-
-    echo
-
-    warning "Esta acción detendrá y eliminará únicamente esta instancia."
-    warning "El binario HCR y los certificados serán conservados."
-
-    echo
-
-    read -rp "  ¿Deseas continuar? [s/N]: " answer
-
-    case "${answer,,}" in
-
-        s|si|sí|y|yes)
-            ;;
-        *)
-            info "Operación cancelada."
-            pause
-            return
-            ;;
-    esac
-
-    echo
-
-    run_remote \
-        "eliminador de puerto" \
-        "${BASE_URL}/delete-port.sh" \
-        "$DELETE_PORT_SCRIPT" || true
-
-    echo
-
-    pause
-}
-
-# ============================================================
-# PREPARAR OPTIMIZADOR
-# ============================================================
-
-prepare_instance_optimizer() {
-
-    local unit_path="$1"
-    local unit_name="$2"
-
-    prepare_install_dir
-
-    spinner_start "Preparando optimizador para ${unit_name}..."
-
-    if ! curl -fL \
-        --retry 3 \
-        --connect-timeout 15 \
-        --max-time 120 \
-        -sS \
-        "${BASE_URL}/optimize.sh" \
-        -o "$OPTIMIZE_SCRIPT"; then
-
-        spinner_stop
-
-        error "No se pudo descargar el optimizador."
-
-        return 1
-    fi
-
-    sed -E \
-        -i \
-        "s#^UNIT_PATH=.*#UNIT_PATH=\"${unit_path}\"#" \
-        "$OPTIMIZE_SCRIPT"
-
-    sed -E \
-        -i \
-        "s#^SERVICE_NAME=.*#SERVICE_NAME=\"${unit_name%.service}\"#" \
-        "$OPTIMIZE_SCRIPT"
-
-    chmod 700 "$OPTIMIZE_SCRIPT"
-
-    chown root:root "$OPTIMIZE_SCRIPT"
-
-    spinner_stop
-
-    success "Optimizador preparado."
-
-    return 0
-}
-
-# ============================================================
-# OPTIMIZAR HCR
+# OPCIÓN 5 — OPTIMIZAR HCR
 # ============================================================
 
 optimize_service() {
@@ -1469,71 +909,15 @@ optimize_service() {
     header
 
     echo -e "  ${BOLD}${WHITE}OPTIMIZAR HCR${RESET}"
-    echo -e "  ${GRAY}Ajusta rendimiento de una instancia HCR específica.${RESET}"
+    echo -e "  ${GRAY}Ajusta el rendimiento del protocolo HCR Server.${RESET}"
     echo
 
-    if ! select_hcr_unit "Selecciona la instancia que deseas optimizar"; then
-
-        info "Operación cancelada."
-
-        pause
-
-        return
-    fi
-
-    local unit="$SELECTED_UNIT"
-    local path="$SELECTED_PATH"
-    local port="$SELECTED_PORT"
-
-    local frame
-    local timeout
-    local target
-    local transport
-
-    frame="$(get_unit_frame "$path")"
-    timeout="$(get_unit_timeout "$path")"
-    target="$(get_unit_target_port "$unit" "$path")"
-    transport="$(get_unit_transport "$path")"
-
-    echo
-
-    echo -e "  ${BOLD}${WHITE}CONFIGURACIÓN DETECTADA${RESET}"
-    echo
-
-    detail "Instancia: ${unit}"
-    detail "Puerto HCR: ${port:----}"
-    detail "Puerto destino: ${target:----}"
-    detail "Transporte: ${transport:----}"
-    detail "Max Download Frame: ${frame:-no configurado}"
-    detail "Download Poll Timeout: ${timeout:-no configurado}"
-
-    echo
-
-    if [[ -z "$path" || ! -f "$path" ]]; then
-
-        error "No se pudo localizar la unidad de systemd."
-
-        pause
-
-        return
-    fi
-
-    echo
-
-    if ! prepare_instance_optimizer "$path" "$unit"; then
-
-        pause
-
-        return
-    fi
-
-    echo
-
-    bash "$OPTIMIZE_SCRIPT"
+    run_remote \
+        "optimizador HCR" \
+        "${BASE_URL}/optimize.sh" \
+        "$OPTIMIZE_SCRIPT"
 
     local result=$?
-
-    rm -f "$OPTIMIZE_SCRIPT"
 
     echo
 
@@ -1547,98 +931,61 @@ optimize_service() {
 }
 
 # ============================================================
-# REINICIAR INSTANCIA
+# OPCIÓN 6 — INICIAR / DETENER SERVICIO
 # ============================================================
 
-restart_selected_instance() {
+start_stop_service() {
 
-    if ! select_hcr_unit "Selecciona la instancia que deseas reiniciar"; then
+    header
 
-        info "Operación cancelada."
+    echo -e "  ${BOLD}${WHITE}INICIAR / DETENER SERVICIO${RESET}"
+    echo -e "  ${GRAY}Administra el servicio HCR Server completo.${RESET}"
+    echo
 
-        pause
+    run_remote \
+        "gestor de servicio HCR" \
+        "${BASE_URL}/start-stop-service.sh" \
+        "$START_STOP_SERVICE_SCRIPT"
 
-        return
-    fi
-
-    local unit="$SELECTED_UNIT"
-    local port="$SELECTED_PORT"
+    local result=$?
 
     echo
 
-    detail "Servicio: ${unit}"
-    detail "Puerto: ${port:----}"
-
-    echo
-
-    spinner_start "Reiniciando ${unit}..."
-
-    if systemctl daemon-reload >/dev/null 2>&1 &&
-       systemctl restart "$unit" >/dev/null 2>&1; then
-
-        spinner_stop
-
-        success "Instancia reiniciada."
-
+    if (( result == 0 )); then
+        success "Operación de servicio finalizada."
     else
-
-        spinner_stop
-
-        error "No se pudo reiniciar ${unit}."
-
-        echo
-
-        systemctl \
-            --no-pager \
-            --full \
-            status "$unit" 2>&1 || true
-
-        pause
-
-        return
-    fi
-
-    echo
-
-    sleep 1
-
-    if systemctl is-active --quiet "$unit"; then
-
-        success "systemd confirma que la instancia está activa."
-
-    else
-
-        error "La instancia no quedó activa."
-
-        pause
-
-        return
-    fi
-
-    if is_port_listening "$port"; then
-
-        success "El puerto ${port} está escuchando correctamente."
-
-    else
-
-        warning "La instancia está activa, pero el puerto ${port} no aparece escuchando."
-
+        error "El gestor de servicio terminó con errores."
     fi
 
     pause
 }
 
 # ============================================================
-# ESTADO GENERAL
+# OPCIÓN 7 — REINICIAR SERVICIO
 # ============================================================
 
-show_general_status() {
+restart_service() {
 
     header
 
-    show_instances
+    echo -e "  ${BOLD}${WHITE}REINICIAR SERVICIO${RESET}"
+    echo -e "  ${GRAY}Reinicia el servicio HCR Server completo.${RESET}"
+    echo
+
+    run_remote \
+        "reiniciador del servicio HCR" \
+        "${BASE_URL}/restart-service.sh" \
+        "$RESTART_SERVICE_SCRIPT"
+
+    local result=$?
 
     echo
+
+    if (( result == 0 )); then
+        success "Servicio reiniciado correctamente."
+    else
+        error "El reiniciador del servicio terminó con errores."
+    fi
 
     pause
 }
@@ -1655,39 +1002,39 @@ show_menu() {
     echo -e "  ${GRAY}Selecciona una operación${RESET}"
     echo
 
-    printf "  ${CYAN}01${RESET}  ${MAGENTA}➤${RESET}  ${WHITE}%-24s${RESET}\n" \
+    printf "  ${CYAN}01${RESET}  ${MAGENTA}➤${RESET}  ${WHITE}%-28s${RESET}\n" \
         "Instalar / reinstalar"
     echo -e "      ${GRAY}Instala o Actualiza HCR Server${RESET}"
     echo
 
-    printf "  ${CYAN}02${RESET}  ${MAGENTA}◈${RESET}  ${WHITE}%-24s${RESET}\n" \
+    printf "  ${CYAN}02${RESET}  ${MAGENTA}◈${RESET}  ${WHITE}%-28s${RESET}\n" \
         "Desinstalar"
     echo -e "      ${GRAY}Elimina la instalación principal${RESET}"
     echo
 
-    printf "  ${CYAN}03${RESET}  ${MAGENTA}◉${RESET}  ${WHITE}%-24s${RESET}\n" \
+    printf "  ${CYAN}03${RESET}  ${MAGENTA}◉${RESET}  ${WHITE}%-28s${RESET}\n" \
         "Gestión de puertos"
-    echo -e "      ${GRAY}Añadir, detener, modificar o eliminar instancias${RESET}"
+    echo -e "      ${GRAY}Iniciar, añadir, modificar o eliminar instancias${RESET}"
     echo
 
-    printf "  ${CYAN}04${RESET}  ${MAGENTA}◉${RESET}  ${WHITE}%-24s${RESET}\n" \
+    printf "  ${CYAN}04${RESET}  ${MAGENTA}◉${RESET}  ${WHITE}%-28s${RESET}\n" \
         "Estados de puertos"
-    echo -e "      ${GRAY}Muestra el estado real de todas las instancias${RESET}"
+    echo -e "      ${GRAY}Muestra el estado general de las instancias${RESET}"
     echo
 
-    printf "  ${CYAN}05${RESET}  ${MAGENTA}↕${RESET}  ${WHITE}%-24s${RESET}\n" \
+    printf "  ${CYAN}05${RESET}  ${MAGENTA}⚙${RESET}  ${WHITE}%-28s${RESET}\n" \
+        "Optimizar HCR"
+    echo -e "      ${GRAY}Ajusta el rendimiento del Protocolo${RESET}"
+    echo
+
+    printf "  ${CYAN}06${RESET}  ${MAGENTA}↕${RESET}  ${WHITE}%-28s${RESET}\n" \
         "Iniciar / Detener Servicio"
     echo -e "      ${GRAY}Inicia o detiene el Servicio HCR por completo.${RESET}"
     echo
 
-    printf "  ${CYAN}06${RESET}  ${MAGENTA}↻${RESET}  ${WHITE}%-24s${RESET}\n" \
+    printf "  ${CYAN}07${RESET}  ${MAGENTA}↻${RESET}  ${WHITE}%-28s${RESET}\n" \
         "Reiniciar Servicio"
     echo -e "      ${GRAY}Reinicia el Servicio HCR por completo.${RESET}"
-    echo
-
-    printf "  ${CYAN}07${RESET}  ${MAGENTA}⚙${RESET}  ${WHITE}%-24s${RESET}\n" \
-        "Optimizar HCR"
-    echo -e "      ${GRAY}Ajusta el rendimiento del Protocolo.${RESET}"
     echo
 
     echo -e "  ${DARK}────────────────────────────────────────────────────────${RESET}"
@@ -1734,34 +1081,31 @@ main() {
 
             4|04)
 
-                show_general_status
+                status_ports
                 ;;
 
             5|05)
 
-                toggle_service
+                optimize_service
                 ;;
 
             6|06)
 
-                header
-
-                echo -e "  ${BOLD}${WHITE}REINICIAR SERVICIO${RESET}"
-                echo -e "  ${GRAY}Selecciona la instancia HCR que deseas reiniciar.${RESET}"
-                echo
-
-                restart_selected_instance
+                start_stop_service
                 ;;
 
             7|07)
 
-                optimize_service
+                restart_service
                 ;;
 
             0|00)
 
                 echo
-                echo -e "  ${CYAN}HCR${RESET} ${GRAY}›${RESET} ${WHITE}Cerrando panel...${RESET}"
+
+                echo -e \
+                    "  ${CYAN}HCR${RESET} ${GRAY}›${RESET} ${WHITE}Cerrando panel...${RESET}"
+
                 echo
 
                 exit 0
