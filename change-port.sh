@@ -3,8 +3,30 @@ set -euo pipefail
 
 # ============================================================
 # HCR SERVER — CAMBIAR PUERTO
-# Cambia el puerto de escucha y el puerto destino
-# del servicio hcr-server
+# ============================================================
+#
+# Compatible con múltiples instancias:
+#
+#   hcr-server-8080.service
+#   hcr-server-8880.service
+#   hcr-server-1443.service
+#
+# Permite:
+#
+#   1. Cambiar puerto HCR
+#      - Modifica --listen :PUERTO
+#      - Renombra la unidad:
+#          hcr-server-8080.service
+#              ↓
+#          hcr-server-8888.service
+#
+#   2. Cambiar puerto destino
+#      - Modifica --target 127.0.0.1:PUERTO
+#      - Mantiene el nombre de la instancia.
+#
+# La instancia NO se elimina ni se crea nuevamente.
+# Se modifica la unidad existente.
+#
 # ============================================================
 
 PATH="/usr/sbin:/usr/bin:/sbin:/bin"
@@ -12,11 +34,8 @@ LC_ALL="C"
 LANG="C"
 export PATH LC_ALL LANG
 
-SERVICE_NAME="hcr-server"
 SYSTEMD_DIR="/etc/systemd/system"
-UNIT_PATH="${SYSTEMD_DIR}/${SERVICE_NAME}.service"
-
-BACKUP_PATH="${UNIT_PATH}.port-backup"
+SERVICE_PREFIX="hcr-server"
 
 SPINNER_PID=""
 
@@ -24,13 +43,21 @@ SPINNER_PID=""
 # VARIABLES
 # ============================================================
 
+SELECTED_SERVICE=""
+SELECTED_UNIT_PATH=""
+
 CURRENT_PORT=""
 CURRENT_TARGET_PORT=""
 
 NEW_PORT=""
-NEW_TARGET_PORT=""
-
 PORT_TYPE=""
+
+OLD_SERVICE=""
+OLD_UNIT_PATH=""
+NEW_SERVICE=""
+NEW_UNIT_PATH=""
+
+BACKUP_PATH=""
 
 # ============================================================
 # COLORES
@@ -139,12 +166,14 @@ spinner_start() {
         local i=0
 
         while true; do
+
             printf '\r%b' \
                 "${BRIGHT_CYAN}${frames[$i]}${RESET} ${message}"
 
             i=$(( (i + 1) % ${#frames[@]} ))
 
             sleep 0.08
+
         done
     ) &
 
@@ -152,15 +181,22 @@ spinner_start() {
 }
 
 spinner_stop() {
+
     if [[ -n "${SPINNER_PID}" ]]; then
+
         kill "${SPINNER_PID}" 2>/dev/null || true
+
         wait "${SPINNER_PID}" 2>/dev/null || true
+
         SPINNER_PID=""
+
         printf '\r\033[K'
+
     fi
 }
 
 fail() {
+
     spinner_stop
 
     printf '\n'
@@ -175,6 +211,7 @@ fail() {
 # ============================================================
 
 require_command() {
+
     command -v "$1" >/dev/null 2>&1 || \
         fail "No se encontró el comando requerido: $1"
 }
@@ -184,6 +221,7 @@ require_command() {
 # ============================================================
 
 validate_environment() {
+
     [[ "${EUID}" -eq 0 ]] || \
         fail "Este script debe ejecutarse como root."
 
@@ -194,48 +232,135 @@ validate_environment() {
     require_command sed
     require_command grep
     require_command cp
+    require_command mv
     require_command rm
     require_command sleep
     require_command ss
     require_command awk
+    require_command sort
 }
 
 # ============================================================
-# VALIDAR SERVICIO
+# OBTENER INSTANCIAS HCR
 # ============================================================
 
-validate_service() {
-    section "VALIDANDO SERVICIO"
+get_hcr_services() {
 
-    if [[ ! -f "$UNIT_PATH" ]]; then
-        fail "No existe la unidad:
+    {
+        systemctl list-unit-files \
+            --type=service \
+            --no-legend \
+            --no-pager \
+            2>/dev/null |
+            awk '{print $1}' |
+            grep -E '^hcr-server(-[0-9]+)?\.service$' ||
+            true
 
-${UNIT_PATH}"
+        find "$SYSTEMD_DIR" \
+            -maxdepth 1 \
+            -type f \
+            -name 'hcr-server.service' \
+            -printf '%f\n' \
+            2>/dev/null ||
+            true
+
+        find "$SYSTEMD_DIR" \
+            -maxdepth 1 \
+            -type f \
+            -name 'hcr-server-[0-9]*.service' \
+            -printf '%f\n' \
+            2>/dev/null ||
+            true
+
+    } |
+    grep -E '^hcr-server(-[0-9]+)?\.service$' |
+    sort -u
+}
+
+# ============================================================
+# OBTENER RUTA DE UNA UNIDAD
+# ============================================================
+
+get_unit_path() {
+
+    local service="$1"
+    local path=""
+
+    path="$(
+        systemctl show \
+            --property=FragmentPath \
+            --value \
+            "$service" \
+            2>/dev/null ||
+            true
+    )"
+
+    if [[ -n "$path" && -f "$path" ]]; then
+
+        echo "$path"
+
+        return 0
     fi
 
-    if ! systemctl cat "${SERVICE_NAME}" >/dev/null 2>&1; then
-        fail "systemd no reconoce el servicio ${SERVICE_NAME}."
+    if [[ -f "${SYSTEMD_DIR}/${service}" ]]; then
+
+        echo "${SYSTEMD_DIR}/${service}"
+
+        return 0
     fi
 
-    success "Servicio encontrado."
+    echo ""
+}
 
-    local current_port
-    local current_target
+# ============================================================
+# OBTENER PUERTO HCR
+# ============================================================
 
-    current_port="$(get_current_port)"
-    current_target="$(get_current_target_port)"
+get_service_port() {
 
-    if [[ -n "$current_port" ]]; then
-        detail "Puerto HCR actual: ${current_port}"
-    else
-        warning "No se pudo detectar automáticamente el puerto HCR actual."
-    fi
+    local path="$1"
 
-    if [[ -n "$current_target" ]]; then
-        detail "Puerto destino actual: ${current_target}"
-    else
-        warning "No se pudo detectar automáticamente el puerto destino actual."
-    fi
+    [[ -f "$path" ]] || return 0
+
+    grep -oE \
+        -- '--listen[[:space:]]+:[0-9]+' \
+        "$path" 2>/dev/null |
+        grep -oE '[0-9]+$' |
+        head -n1 ||
+        true
+}
+
+# ============================================================
+# OBTENER PUERTO DESTINO
+# ============================================================
+
+get_service_target_port() {
+
+    local path="$1"
+
+    [[ -f "$path" ]] || return 0
+
+    grep -oE \
+        -- '--target[[:space:]]+127\.0\.0\.1:[0-9]+' \
+        "$path" 2>/dev/null |
+        grep -oE '[0-9]+$' |
+        head -n1 ||
+        true
+}
+
+# ============================================================
+# COMPROBAR PUERTO ESCUCHANDO
+# ============================================================
+
+check_port_usage() {
+
+    local port="$1"
+
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+
+    ss -ltnH 2>/dev/null |
+        awk '{print $4}' |
+        grep -Eq "(:|\\])${port}$"
 }
 
 # ============================================================
@@ -243,15 +368,22 @@ ${UNIT_PATH}"
 # ============================================================
 
 validate_port() {
+
     local port="$1"
 
     [[ "$port" =~ ^[0-9]+$ ]] || {
-        error_message "El puerto debe ser un número."
+
+        error_message \
+            "El puerto debe ser un número."
+
         return 1
     }
 
     (( port >= 1 && port <= 65535 )) || {
-        error_message "El puerto debe estar entre 1 y 65535."
+
+        error_message \
+            "El puerto debe estar entre 1 y 65535."
+
         return 1
     }
 
@@ -259,51 +391,11 @@ validate_port() {
 }
 
 # ============================================================
-# COMPROBAR SI EL PUERTO ESTÁ EN USO
-# ============================================================
-
-check_port_usage() {
-    local port="$1"
-
-    if ss -ltnH 2>/dev/null |
-        awk '{print $4}' |
-        grep -Eq "(:|\\])${port}$"; then
-
-        return 0
-    fi
-
-    return 1
-}
-
-# ============================================================
-# OBTENER PUERTO HCR ACTUAL
-# ============================================================
-
-get_current_port() {
-    grep -oE \
-        -- '--listen[[:space:]]+:[0-9]+' \
-        "$UNIT_PATH" |
-        grep -oE '[0-9]+$' |
-        head -n1 || true
-}
-
-# ============================================================
-# OBTENER PUERTO DESTINO ACTUAL
-# ============================================================
-
-get_current_target_port() {
-    grep -oE \
-        -- '--target[[:space:]]+127\.0\.0\.1:[0-9]+' \
-        "$UNIT_PATH" |
-        grep -oE '[0-9]+$' |
-        head -n1 || true
-}
-
-# ============================================================
-# VERIFICAR SI UN PUERTO ES PRIVILEGIADO
+# PUERTO PRIVILEGIADO
 # ============================================================
 
 is_privileged_port() {
+
     local port="$1"
 
     [[ "$port" =~ ^[0-9]+$ ]] || return 1
@@ -312,115 +404,237 @@ is_privileged_port() {
 }
 
 # ============================================================
-# CONFIGURAR CAPACIDAD PARA PUERTOS PRIVILEGIADOS
+# CONFIGURAR CAPACIDAD DE BIND
 # ============================================================
 
 configure_bind_capability() {
-    local port="$1"
+
+    local path="$1"
+    local port="$2"
+
+    [[ -f "$path" ]] || \
+        fail "No existe la unidad seleccionada."
 
     # --------------------------------------------------------
-    # El puerto destino NO necesita esta capacidad.
-    # Solamente se aplica al puerto de escucha HCR.
+    # Puerto NO privilegiado
+    #
+    # No necesitamos modificar la unidad.
+    # Si ya tiene estas capacidades, no las eliminamos
+    # automáticamente para evitar modificar configuraciones
+    # que puedan haber sido agregadas por otro proceso.
     # --------------------------------------------------------
 
     if ! is_privileged_port "$port"; then
-
-        # ----------------------------------------------------
-        # Si existe una capacidad específica de bind,
-        # se elimina para conservar la configuración mínima.
-        # ----------------------------------------------------
-
-        sed -E \
-            -i \
-            '/^[[:space:]]*CapabilityBoundingSet=CAP_NET_BIND_SERVICE[[:space:]]*$/d' \
-            "$UNIT_PATH"
-
-        sed -E \
-            -i \
-            '/^[[:space:]]*AmbientCapabilities=CAP_NET_BIND_SERVICE[[:space:]]*$/d' \
-            "$UNIT_PATH"
-
         return 0
     fi
 
     # --------------------------------------------------------
-    # PUERTO PRIVILEGIADO
-    #
-    # CAP_NET_BIND_SERVICE permite a HCR Server abrir
-    # puertos inferiores a 1024, como 80 y 443.
+    # CAP_NET_BIND_SERVICE
     # --------------------------------------------------------
 
     if grep -Eq \
         '^[[:space:]]*CapabilityBoundingSet=' \
-        "$UNIT_PATH"; then
+        "$path"; then
 
-        sed -E \
-            -i \
-            's#^[[:space:]]*CapabilityBoundingSet=.*$#CapabilityBoundingSet=CAP_NET_BIND_SERVICE#' \
-            "$UNIT_PATH"
+        if ! grep -Eq \
+            '^[[:space:]]*CapabilityBoundingSet=.*CAP_NET_BIND_SERVICE' \
+            "$path"; then
+
+            sed -E \
+                -i \
+                's#^([[:space:]]*CapabilityBoundingSet=.*)$#\1 CAP_NET_BIND_SERVICE#' \
+                "$path"
+        fi
 
     else
 
         sed -E \
             -i \
             '/^\[Service\]/a CapabilityBoundingSet=CAP_NET_BIND_SERVICE' \
-            "$UNIT_PATH"
+            "$path"
 
     fi
 
     if grep -Eq \
         '^[[:space:]]*AmbientCapabilities=' \
-        "$UNIT_PATH"; then
+        "$path"; then
 
-        sed -E \
-            -i \
-            's#^[[:space:]]*AmbientCapabilities=.*$#AmbientCapabilities=CAP_NET_BIND_SERVICE#' \
-            "$UNIT_PATH"
+        if ! grep -Eq \
+            '^[[:space:]]*AmbientCapabilities=.*CAP_NET_BIND_SERVICE' \
+            "$path"; then
+
+            sed -E \
+                -i \
+                's#^([[:space:]]*AmbientCapabilities=.*)$#\1 CAP_NET_BIND_SERVICE#' \
+                "$path"
+        fi
 
     else
 
         sed -E \
             -i \
             '/^\[Service\]/a AmbientCapabilities=CAP_NET_BIND_SERVICE' \
-            "$UNIT_PATH"
+            "$path"
 
-    fi
-
-    # --------------------------------------------------------
-    # VERIFICACIÓN
-    # --------------------------------------------------------
-
-    if ! grep -Eq \
-        '^CapabilityBoundingSet=CAP_NET_BIND_SERVICE$' \
-        "$UNIT_PATH"; then
-
-        fail \
-            "No se pudo configurar CAP_NET_BIND_SERVICE en systemd."
-    fi
-
-    if ! grep -Eq \
-        '^AmbientCapabilities=CAP_NET_BIND_SERVICE$' \
-        "$UNIT_PATH"; then
-
-        fail \
-            "No se pudo configurar AmbientCapabilities para HCR Server."
     fi
 }
 
 # ============================================================
-# MENÚ DE PUERTOS
+# SELECCIONAR INSTANCIA
+# ============================================================
+
+select_service() {
+
+    section "SELECCIONAR INSTANCIA HCR"
+
+    local services
+    local count=0
+    local service
+    local path
+    local port
+    local target
+    local state
+
+    services="$(get_hcr_services)"
+
+    if [[ -z "$services" ]]; then
+
+        fail \
+            "No se encontraron instancias HCR Server."
+
+    fi
+
+    printf '\n'
+
+    printf '%b\n' \
+        "${BRIGHT_WHITE}INSTANCIAS DETECTADAS:${RESET}"
+
+    printf '\n'
+
+    while IFS= read -r service; do
+
+        [[ -n "$service" ]] || continue
+
+        count=$((count + 1))
+
+        path="$(get_unit_path "$service")"
+
+        port="$(get_service_port "$path")"
+
+        target="$(get_service_target_port "$path")"
+
+        state="$(
+            systemctl is-active "$service" \
+                2>/dev/null ||
+                echo "inactive"
+        )"
+
+        if [[ "$state" == "active" ]]; then
+            state="${BRIGHT_GREEN}ACTIVO${RESET}"
+        else
+            state="${YELLOW}${state^^}${RESET}"
+        fi
+
+        printf '%b\n' \
+            "${BRIGHT_WHITE}${count})${RESET} ${CYAN}${service}${RESET}"
+
+        detail \
+            "Puerto HCR: ${port:-desconocido}"
+
+        detail \
+            "Puerto destino: ${target:-desconocido}"
+
+        detail \
+            "Estado: ${state}"
+
+        printf '\n'
+
+    done <<< "$services"
+
+    printf '%b\n' \
+        "${BRIGHT_WHITE}0)${RESET} Cancelar"
+
+    printf '\n'
+
+    while true; do
+
+        read -r -p \
+            "➜ Selecciona una instancia [0-${count}]: " option
+
+        if [[ "$option" == "0" ]]; then
+
+            info "Operación cancelada."
+
+            exit 0
+        fi
+
+        if [[ "$option" =~ ^[0-9]+$ ]] &&
+           (( option >= 1 && option <= count )); then
+
+            local index=0
+
+            while IFS= read -r service; do
+
+                [[ -n "$service" ]] || continue
+
+                index=$((index + 1))
+
+                if (( index == option )); then
+
+                    SELECTED_SERVICE="$service"
+
+                    break
+                fi
+
+            done <<< "$services"
+
+            break
+        fi
+
+        error_message \
+            "Selección inválida."
+
+    done
+
+    SELECTED_UNIT_PATH="$(get_unit_path "$SELECTED_SERVICE")"
+
+    if [[ -z "$SELECTED_UNIT_PATH" ||
+          ! -f "$SELECTED_UNIT_PATH" ]]; then
+
+        fail \
+            "No se pudo localizar la unidad seleccionada."
+    fi
+
+    CURRENT_PORT="$(get_service_port "$SELECTED_UNIT_PATH")"
+
+    CURRENT_TARGET_PORT="$(
+        get_service_target_port "$SELECTED_UNIT_PATH"
+    )"
+
+    OLD_SERVICE="$SELECTED_SERVICE"
+    OLD_UNIT_PATH="$SELECTED_UNIT_PATH"
+
+    printf '\n'
+
+    success \
+        "Instancia seleccionada: ${SELECTED_SERVICE}"
+
+    detail \
+        "Puerto HCR actual: ${CURRENT_PORT:-desconocido}"
+
+    detail \
+        "Puerto destino actual: ${CURRENT_TARGET_PORT:-desconocido}"
+}
+
+# ============================================================
+# SELECCIONAR QUÉ CAMBIAR
 # ============================================================
 
 select_port_type() {
+
     while true; do
 
-        section "SELECCIONAR PUERTO"
-
-        local current_port
-        local current_target
-
-        current_port="$(get_current_port)"
-        current_target="$(get_current_target_port)"
+        section "SELECCIONAR CAMBIO"
 
         printf '\n'
 
@@ -428,7 +642,7 @@ select_port_type() {
             "${BRIGHT_WHITE}1)${RESET} Cambiar puerto HCR"
 
         detail \
-            "Puerto de escucha: ${current_port:-desconocido}"
+            "Modifica --listen y renombra la instancia."
 
         printf '\n'
 
@@ -436,7 +650,7 @@ select_port_type() {
             "${BRIGHT_WHITE}2)${RESET} Cambiar puerto destino"
 
         detail \
-            "Puerto destino: ${current_target:-desconocido}"
+            "Modifica únicamente --target."
 
         printf '\n'
 
@@ -446,9 +660,9 @@ select_port_type() {
         printf '\n'
 
         read -r -p \
-            "➜ Selecciona una opción [1-3]: " PORT_OPTION
+            "➜ Selecciona una opción [1-3]: " option
 
-        case "${PORT_OPTION}" in
+        case "$option" in
 
             1)
                 PORT_TYPE="hcr"
@@ -461,14 +675,13 @@ select_port_type() {
                 ;;
 
             3)
-                printf '\n'
                 info "Operación cancelada."
                 exit 0
                 ;;
 
             *)
                 error_message \
-                    "Opción no válida. Debe seleccionar 1, 2 o 3."
+                    "Opción no válida."
                 ;;
 
         esac
@@ -476,66 +689,79 @@ select_port_type() {
 }
 
 # ============================================================
-# SOLICITAR PUERTO HCR
+# COMPROBAR SI EXISTE UNA UNIDAD
+# ============================================================
+
+service_exists() {
+
+    local service="$1"
+
+    [[ -f "${SYSTEMD_DIR}/${service}" ]] ||
+        systemctl cat "$service" >/dev/null 2>&1
+}
+
+# ============================================================
+# SOLICITAR NUEVO PUERTO HCR
 # ============================================================
 
 ask_hcr_port() {
-    local current_port
-
-    current_port="$(get_current_port)"
-
-    printf '\n'
-
-    if [[ -n "$current_port" ]]; then
-        info \
-            "Puerto HCR actual: ${BRIGHT_WHITE}${current_port}${RESET}"
-    fi
 
     while true; do
 
         printf '\n'
 
         read -r -p \
-            "➜ Ingresa el nuevo puerto HCR: " NEW_PORT
-
-        # ----------------------------------------------------
-        # Validación numérica y rango
-        # ----------------------------------------------------
+            "➜ Nuevo puerto HCR [actual ${CURRENT_PORT:-desconocido}]: " NEW_PORT
 
         if ! validate_port "$NEW_PORT"; then
             continue
         fi
 
         # ----------------------------------------------------
-        # Si es el mismo puerto actual:
-        # NO se considera conflicto.
+        # Si no cambia el puerto
         # ----------------------------------------------------
 
-        if [[ "$NEW_PORT" == "$current_port" ]]; then
+        if [[ "$NEW_PORT" == "$CURRENT_PORT" ]]; then
 
             info \
-                "El puerto ${NEW_PORT} ya está configurado para HCR Server."
-
-            info \
-                "Se reiniciará el servicio para aplicar/verificar la configuración."
+                "El puerto HCR ya está configurado como ${NEW_PORT}."
 
             return 0
         fi
 
         # ----------------------------------------------------
-        # Si es diferente, debe estar libre.
+        # Verificar listener real
         # ----------------------------------------------------
 
         if check_port_usage "$NEW_PORT"; then
 
             warning \
-                "El puerto ${NEW_PORT} ya está siendo utilizado por otro servicio."
+                "El puerto ${NEW_PORT} ya está siendo utilizado."
 
-            warning \
-                "Selecciona otro puerto."
+            detail \
+                "Debes seleccionar un puerto HCR que esté libre."
 
             continue
         fi
+
+        # ----------------------------------------------------
+        # Verificar nombre de unidad
+        # ----------------------------------------------------
+
+        NEW_SERVICE="${SERVICE_PREFIX}-${NEW_PORT}.service"
+
+        if service_exists "$NEW_SERVICE"; then
+
+            warning \
+                "La unidad ${NEW_SERVICE} ya existe."
+
+            detail \
+                "No se sobrescribirá otra instancia."
+
+            continue
+        fi
+
+        NEW_UNIT_PATH="${SYSTEMD_DIR}/${NEW_SERVICE}"
 
         success \
             "El puerto ${NEW_PORT} está disponible."
@@ -549,70 +775,41 @@ ask_hcr_port() {
 # ============================================================
 
 ask_target_port() {
-    local current_target
-
-    current_target="$(get_current_target_port)"
-
-    printf '\n'
-
-    if [[ -n "$current_target" ]]; then
-        info \
-            "Puerto destino actual: ${BRIGHT_WHITE}${current_target}${RESET}"
-    fi
 
     while true; do
 
         printf '\n'
 
         read -r -p \
-            "➜ Ingresa el nuevo puerto destino: " NEW_PORT
-
-        # ----------------------------------------------------
-        # Validación numérica y rango
-        # ----------------------------------------------------
+            "➜ Nuevo puerto destino [actual ${CURRENT_TARGET_PORT:-desconocido}]: " NEW_PORT
 
         if ! validate_port "$NEW_PORT"; then
             continue
         fi
 
-        # ----------------------------------------------------
-        # Si es el mismo puerto destino:
-        # no se considera conflicto.
-        # ----------------------------------------------------
-
-        if [[ "$NEW_PORT" == "$current_target" ]]; then
+        if [[ "$NEW_PORT" == "$CURRENT_TARGET_PORT" ]]; then
 
             info \
-                "El puerto destino ${NEW_PORT} ya está configurado."
-
-            info \
-                "Se reiniciará el servicio para aplicar/verificar la configuración."
+                "El puerto destino ya está configurado como ${NEW_PORT}."
 
             return 0
         fi
 
-        # ----------------------------------------------------
-        # El puerto destino puede estar ocupado.
-        #
-        # Esto es NORMAL si precisamente existe un servicio
-        # escuchando en ese puerto.
-        # ----------------------------------------------------
-
         if check_port_usage "$NEW_PORT"; then
 
             success \
-                "El puerto destino ${NEW_PORT} está siendo utilizado por un servicio."
+                "El puerto destino ${NEW_PORT} está siendo utilizado."
 
             detail \
-                "Esto es normal si el servicio destino está escuchando en este puerto."
+                "Esto puede ser normal si el servicio destino escucha en ese puerto."
 
         else
 
             warning \
-                "No se detectó ningún servicio escuchando en el puerto ${NEW_PORT}."
+                "No se detectó un servicio escuchando en ${NEW_PORT}."
 
             detail \
-                "HCR podrá configurarse, pero debes asegurarte de que el servicio destino utilice este puerto."
+                "La configuración se aplicará igualmente."
 
         fi
 
@@ -625,7 +822,8 @@ ask_target_port() {
 # ============================================================
 
 ask_new_port() {
-    case "${PORT_TYPE}" in
+
+    case "$PORT_TYPE" in
 
         hcr)
             ask_hcr_port
@@ -636,7 +834,7 @@ ask_new_port() {
             ;;
 
         *)
-            fail "Tipo de puerto no válido."
+            fail "Tipo de puerto inválido."
             ;;
 
     esac
@@ -647,41 +845,49 @@ ask_new_port() {
 # ============================================================
 
 confirm_change() {
-    printf '\n'
 
     section "CONFIRMACIÓN"
 
-    detail "Servicio: ${SERVICE_NAME}"
+    printf '\n'
 
-    if [[ "${PORT_TYPE}" == "hcr" ]]; then
+    detail \
+        "Instancia actual: ${OLD_SERVICE}"
+
+    if [[ "$PORT_TYPE" == "hcr" ]]; then
 
         detail \
-            "Puerto HCR anterior: ${CURRENT_PORT:-desconocido}"
+            "Puerto HCR: ${CURRENT_PORT:-desconocido} → ${NEW_PORT}"
 
         detail \
-            "Puerto HCR nuevo:    ${NEW_PORT}"
+            "Nombre actual: ${OLD_SERVICE}"
+
+        detail \
+            "Nombre nuevo: ${NEW_SERVICE}"
+
+        detail \
+            "Archivo nuevo: ${NEW_UNIT_PATH}"
 
         if is_privileged_port "$NEW_PORT"; then
 
             detail \
-                "Capacidad:           CAP_NET_BIND_SERVICE"
+                "Permiso: CAP_NET_BIND_SERVICE"
 
         fi
 
     else
 
         detail \
-            "Puerto destino anterior: ${CURRENT_TARGET_PORT:-desconocido}"
+            "Puerto destino: ${CURRENT_TARGET_PORT:-desconocido} → ${NEW_PORT}"
 
         detail \
-            "Puerto destino nuevo:    ${NEW_PORT}"
+            "Nombre de instancia: se mantiene"
 
     fi
 
     printf '\n'
 
     warning \
-        "El servicio será reiniciado para aplicar la configuración."
+        "La instancia será detenida y reiniciada para aplicar el cambio."
 
     printf '\n'
 
@@ -695,24 +901,32 @@ confirm_change() {
 
         *)
             printf '\n'
+
             info "Operación cancelada."
+
             exit 0
+
             ;;
 
     esac
 }
 
 # ============================================================
-# COPIA DE SEGURIDAD
+# CREAR RESPALDO
 # ============================================================
 
 create_backup() {
+
     section "CREANDO RESPALDO"
 
-    spinner_start \
-        "Creando respaldo de la unidad..."
+    BACKUP_PATH="${OLD_UNIT_PATH}.port-backup"
 
-    if cp -f -- "$UNIT_PATH" "$BACKUP_PATH"; then
+    spinner_start \
+        "Creando respaldo..."
+
+    if cp -f \
+        -- "$OLD_UNIT_PATH" \
+        "$BACKUP_PATH"; then
 
         spinner_stop
 
@@ -721,7 +935,7 @@ create_backup() {
         spinner_stop
 
         fail \
-            "No se pudo crear el respaldo de la unidad."
+            "No se pudo crear el respaldo."
 
     fi
 
@@ -732,128 +946,173 @@ create_backup() {
 }
 
 # ============================================================
-# CAMBIAR PUERTO
+# DETENER INSTANCIA
 # ============================================================
 
-change_port() {
-    section "CAMBIANDO PUERTO"
+stop_selected_service() {
+
+    section "DETENIENDO INSTANCIA"
 
     spinner_start \
-        "Actualizando configuración..."
+        "Deteniendo ${OLD_SERVICE}..."
 
-    # --------------------------------------------------------
-    # PUERTO HCR
-    # --------------------------------------------------------
+    if systemctl stop "$OLD_SERVICE"; then
 
-    if [[ "${PORT_TYPE}" == "hcr" ]]; then
+        spinner_stop
 
-        if sed -E \
-            -i \
-            "s#(--listen[[:space:]]+):[0-9]+#\1:${NEW_PORT}#g" \
-            "$UNIT_PATH"; then
-
-            :
-
-        else
-
-            spinner_stop
-
-            fail \
-                "No se pudo actualizar el puerto HCR."
-
-        fi
-
-        # ----------------------------------------------------
-        # CONFIGURAR CAPACIDAD PARA PUERTOS PRIVILEGIADOS
-        # ----------------------------------------------------
-
-        configure_bind_capability "$NEW_PORT"
-
-    # --------------------------------------------------------
-    # PUERTO DESTINO
-    # --------------------------------------------------------
-
-    elif [[ "${PORT_TYPE}" == "target" ]]; then
-
-        if sed -E \
-            -i \
-            "s#(--target[[:space:]]+127\.0\.0\.1:)[0-9]+#\1${NEW_PORT}#g" \
-            "$UNIT_PATH"; then
-
-            :
-
-        else
-
-            spinner_stop
-
-            fail \
-                "No se pudo actualizar el puerto destino."
-
-        fi
+        success \
+            "Instancia detenida."
 
     else
 
         spinner_stop
 
         fail \
-            "Tipo de puerto no válido."
+            "No se pudo detener ${OLD_SERVICE}."
+    fi
+}
 
+# ============================================================
+# MODIFICAR CONFIGURACIÓN
+# ============================================================
+
+modify_unit_configuration() {
+
+    section "ACTUALIZANDO CONFIGURACIÓN"
+
+    spinner_start \
+        "Modificando unidad..."
+
+    if [[ "$PORT_TYPE" == "hcr" ]]; then
+
+        if ! sed -E \
+            -i \
+            "s#(--listen[[:space:]]+):[0-9]+#\1:${NEW_PORT}#g" \
+            "$OLD_UNIT_PATH"; then
+
+            spinner_stop
+
+            fail \
+                "No se pudo modificar el puerto HCR."
+        fi
+
+        configure_bind_capability \
+            "$OLD_UNIT_PATH" \
+            "$NEW_PORT"
+
+    else
+
+        if ! sed -E \
+            -i \
+            "s#(--target[[:space:]]+127\.0\.0\.1:)[0-9]+#\1${NEW_PORT}#g" \
+            "$OLD_UNIT_PATH"; then
+
+            spinner_stop
+
+            fail \
+                "No se pudo modificar el puerto destino."
+        fi
     fi
 
     spinner_stop
 
-    # --------------------------------------------------------
-    # VERIFICAR CAMBIO
-    # --------------------------------------------------------
+    success \
+        "Configuración modificada."
 
-    local verified_port
-
-    if [[ "${PORT_TYPE}" == "hcr" ]]; then
-
-        verified_port="$(get_current_port)"
-
-        if [[ "$verified_port" != "$NEW_PORT" ]]; then
-
-            fail \
-                "No se pudo aplicar correctamente el nuevo puerto HCR."
-
-        fi
-
-        success \
-            "Puerto HCR actualizado."
+    if [[ "$PORT_TYPE" == "hcr" ]]; then
 
         detail \
-            "Nuevo puerto HCR: ${NEW_PORT}"
-
-        # ----------------------------------------------------
-        # INFORMAR CAPACIDAD
-        # ----------------------------------------------------
-
-        if is_privileged_port "$NEW_PORT"; then
-
-            success \
-                "CAP_NET_BIND_SERVICE configurada para el puerto ${NEW_PORT}."
-
-        fi
+            "--listen :${NEW_PORT}"
 
     else
 
-        verified_port="$(get_current_target_port)"
-
-        if [[ "$verified_port" != "$NEW_PORT" ]]; then
-
-            fail \
-                "No se pudo aplicar correctamente el nuevo puerto destino."
-
-        fi
-
-        success \
-            "Puerto destino actualizado."
-
         detail \
-            "Nuevo puerto destino: ${NEW_PORT}"
+            "--target 127.0.0.1:${NEW_PORT}"
 
     fi
+}
+
+# ============================================================
+# VERIFICAR CONFIGURACIÓN MODIFICADA
+# ============================================================
+
+verify_modified_configuration() {
+
+    local port
+
+    if [[ "$PORT_TYPE" == "hcr" ]]; then
+
+        port="$(get_service_port "$OLD_UNIT_PATH")"
+
+    else
+
+        port="$(get_service_target_port "$OLD_UNIT_PATH")"
+
+    fi
+
+    if [[ "$port" != "$NEW_PORT" ]]; then
+
+        fail \
+            "La configuración modificada no coincide con el nuevo puerto."
+
+    fi
+
+    success \
+        "Configuración verificada."
+
+}
+
+# ============================================================
+# RENOMBRAR UNIDAD
+# ============================================================
+
+rename_unit() {
+
+    section "RENOMBRANDO INSTANCIA"
+
+    if [[ "$PORT_TYPE" != "hcr" ]]; then
+
+        return 0
+    fi
+
+    if [[ "$OLD_UNIT_PATH" == "$NEW_UNIT_PATH" ]]; then
+
+        return 0
+    fi
+
+    spinner_start \
+        "Renombrando ${OLD_SERVICE}..."
+
+    if ! mv \
+        -- "$OLD_UNIT_PATH" \
+        "$NEW_UNIT_PATH"; then
+
+        spinner_stop
+
+        fail \
+            "No se pudo renombrar la unidad."
+    fi
+
+    spinner_stop
+
+    success \
+        "Instancia renombrada."
+
+    detail \
+        "${OLD_SERVICE}"
+
+    detail \
+        "↓"
+
+    detail \
+        "${NEW_SERVICE}"
+
+    # --------------------------------------------------------
+    # Actualizar variables internas
+    # --------------------------------------------------------
+
+    SELECTED_SERVICE="$NEW_SERVICE"
+    SELECTED_UNIT_PATH="$NEW_UNIT_PATH"
 }
 
 # ============================================================
@@ -861,6 +1120,7 @@ change_port() {
 # ============================================================
 
 reload_systemd() {
+
     section "RECARGANDO SYSTEMD"
 
     spinner_start \
@@ -875,8 +1135,7 @@ reload_systemd() {
         spinner_stop
 
         fail \
-            "No se pudo recargar la configuración de systemd."
-
+            "No se pudo recargar systemd."
     fi
 
     success \
@@ -884,83 +1143,103 @@ reload_systemd() {
 }
 
 # ============================================================
-# REINICIAR SERVICIO
+# RESTAURAR RESPALDO
 # ============================================================
 
-restart_service() {
-    section "REINICIANDO SERVICIO"
+restore_backup() {
+
+    printf '\n'
+
+    warning \
+        "Intentando restaurar la configuración anterior..."
+
+    # --------------------------------------------------------
+    # Si fue renombrada, eliminar la nueva unidad modificada
+    # y devolverla a su nombre original.
+    # --------------------------------------------------------
+
+    if [[ "$PORT_TYPE" == "hcr" ]] &&
+       [[ -f "$NEW_UNIT_PATH" ]]; then
+
+        rm -f -- "$NEW_UNIT_PATH"
+    fi
+
+    # --------------------------------------------------------
+    # Restaurar archivo original
+    # --------------------------------------------------------
+
+    if [[ -f "$BACKUP_PATH" ]]; then
+
+        cp -f \
+            -- "$BACKUP_PATH" \
+            "$OLD_UNIT_PATH"
+
+    fi
+
+    systemctl daemon-reload 2>/dev/null || true
+
+    systemctl stop \
+        "$NEW_SERVICE" \
+        2>/dev/null || true
+
+    systemctl restart \
+        "$OLD_SERVICE" \
+        2>/dev/null || true
+
+    success \
+        "Se intentó restaurar la instancia anterior."
+}
+
+# ============================================================
+# INICIAR NUEVA INSTANCIA
+# ============================================================
+
+start_modified_service() {
+
+    section "INICIANDO INSTANCIA"
+
+    local service_to_start
+
+    if [[ "$PORT_TYPE" == "hcr" ]]; then
+
+        service_to_start="$NEW_SERVICE"
+
+    else
+
+        service_to_start="$OLD_SERVICE"
+
+    fi
 
     spinner_start \
-        "Reiniciando ${SERVICE_NAME}..."
+        "Iniciando ${service_to_start}..."
 
-    if systemctl restart "${SERVICE_NAME}"; then
+    if systemctl start "$service_to_start"; then
 
         spinner_stop
 
         success \
-            "Servicio reiniciado."
+            "Instancia iniciada."
 
     else
 
         spinner_stop
 
         warning \
-            "El servicio no pudo iniciar con la nueva configuración."
-
-        warning \
-            "Intentando restaurar la configuración anterior..."
+            "La instancia no pudo iniciar."
 
         restore_backup
 
-        if ! systemctl daemon-reload; then
-
-            fail \
-                "No se pudo recargar systemd después de restaurar el respaldo."
-
-        fi
-
-        if systemctl restart "${SERVICE_NAME}"; then
-
-            success \
-                "Configuración anterior restaurada."
-
-            fail \
-                "No se pudo aplicar la nueva configuración."
-
-        else
-
-            fail \
-                "No se pudo aplicar la nueva configuración y tampoco fue posible restaurar correctamente el servicio."
-
-        fi
+        fail \
+            "No se pudo aplicar el nuevo puerto."
     fi
 }
 
 # ============================================================
-# RESTAURAR RESPALDO
+# ESPERAR PUERTO
 # ============================================================
 
-restore_backup() {
-    if [[ ! -f "$BACKUP_PATH" ]]; then
+wait_for_port() {
 
-        fail \
-            "No existe el respaldo necesario para restaurar la configuración."
-
-    fi
-
-    if ! cp -f -- "$BACKUP_PATH" "$UNIT_PATH"; then
-
-        fail \
-            "No se pudo restaurar la configuración anterior."
-
-    fi
-}
-
-# ============================================================
-# ESPERAR ESCUCHA DEL PUERTO HCR
-# ============================================================
-
-wait_for_hcr_listen() {
     local port="$1"
     local attempts=0
     local max_attempts=20
@@ -968,12 +1247,14 @@ wait_for_hcr_listen() {
     while (( attempts < max_attempts )); do
 
         if check_port_usage "$port"; then
+
             return 0
         fi
 
         sleep 0.25
 
         attempts=$((attempts + 1))
+
     done
 
     return 1
@@ -983,163 +1264,196 @@ wait_for_hcr_listen() {
 # VERIFICACIÓN FINAL
 # ============================================================
 
-verify_service() {
+verify_final_state() {
+
     section "VERIFICACIÓN FINAL"
 
+    local service
+    local path
     local active
+    local final_port
+    local final_target
+
+    if [[ "$PORT_TYPE" == "hcr" ]]; then
+
+        service="$NEW_SERVICE"
+        path="$NEW_UNIT_PATH"
+
+    else
+
+        service="$OLD_SERVICE"
+        path="$OLD_UNIT_PATH"
+
+    fi
 
     active="$(
-        systemctl is-active \
-            "${SERVICE_NAME}" 2>/dev/null || true
+        systemctl is-active "$service" \
+            2>/dev/null ||
+            true
     )"
 
     if [[ "$active" != "active" ]]; then
 
         error_message \
-            "El servicio no quedó activo."
-
-        printf '\n'
+            "La instancia no quedó activa."
 
         systemctl \
             --no-pager \
             --full \
-            status "${SERVICE_NAME}" 2>&1 || true
+            status "$service" \
+            2>&1 || true
 
         return 1
     fi
 
     success \
-        "Servicio activo."
-
-    local final_port
+        "Instancia activa."
 
     # --------------------------------------------------------
-    # OBTENER PUERTO CONFIGURADO
+    # Verificar puerto HCR
     # --------------------------------------------------------
 
-    if [[ "${PORT_TYPE}" == "hcr" ]]; then
+    if [[ "$PORT_TYPE" == "hcr" ]]; then
 
-        final_port="$(get_current_port)"
+        final_port="$(get_service_port "$path")"
 
-    else
-
-        final_port="$(get_current_target_port)"
-
-    fi
-
-    # --------------------------------------------------------
-    # VERIFICAR CONFIGURACIÓN
-    # --------------------------------------------------------
-
-    if [[ "$final_port" == "$NEW_PORT" ]]; then
-
-        if [[ "${PORT_TYPE}" == "hcr" ]]; then
-
-            success \
-                "Puerto HCR configurado correctamente: ${NEW_PORT}"
-
-        else
-
-            success \
-                "Puerto destino configurado correctamente: ${NEW_PORT}"
-
-        fi
-
-    else
-
-        error_message \
-            "El puerto detectado no coincide con el solicitado."
-
-        detail \
-            "Esperado: ${NEW_PORT}"
-
-        detail \
-            "Detectado: ${final_port:-desconocido}"
-
-        return 1
-    fi
-
-    # --------------------------------------------------------
-    # VERIFICAR CAPACIDAD PARA PUERTO PRIVILEGIADO
-    # --------------------------------------------------------
-
-    if [[ "${PORT_TYPE}" == "hcr" ]] &&
-       is_privileged_port "$NEW_PORT"; then
-
-        if ! systemctl cat "${SERVICE_NAME}" 2>/dev/null |
-            grep -Eq \
-                '^CapabilityBoundingSet=CAP_NET_BIND_SERVICE$'; then
+        if [[ "$final_port" != "$NEW_PORT" ]]; then
 
             error_message \
-                "No se detectó CAP_NET_BIND_SERVICE en el servicio."
+                "El puerto HCR configurado no coincide."
 
-            return 1
-        fi
+            detail \
+                "Esperado: ${NEW_PORT}"
 
-        if ! systemctl cat "${SERVICE_NAME}" 2>/dev/null |
-            grep -Eq \
-                '^AmbientCapabilities=CAP_NET_BIND_SERVICE$'; then
-
-            error_message \
-                "No se detectó AmbientCapabilities=CAP_NET_BIND_SERVICE en el servicio."
+            detail \
+                "Detectado: ${final_port:-desconocido}"
 
             return 1
         fi
 
         success \
-            "Permiso para puerto privilegiado verificado."
-
-    fi
-
-    # --------------------------------------------------------
-    # VERIFICAR ESCUCHA DEL PUERTO HCR
-    # --------------------------------------------------------
-
-    if [[ "${PORT_TYPE}" == "hcr" ]]; then
+            "Puerto HCR configurado: ${NEW_PORT}"
 
         info \
-            "Verificando escucha del puerto HCR..."
+            "Verificando escucha del puerto..."
 
-        if wait_for_hcr_listen "$NEW_PORT"; then
+        if wait_for_port "$NEW_PORT"; then
 
             success \
-                "El puerto HCR ${NEW_PORT} está siendo utilizado por el servicio."
+                "El puerto ${NEW_PORT} está escuchando."
 
         else
 
             error_message \
-                "El servicio está activo, pero no se detectó escucha en el puerto HCR ${NEW_PORT}."
-
-            printf '\n'
+                "La instancia está activa, pero no se detectó escucha en ${NEW_PORT}."
 
             systemctl \
                 --no-pager \
                 --full \
-                status "${SERVICE_NAME}" 2>&1 || true
+                status "$service" \
+                2>&1 || true
 
             return 1
         fi
 
+        # ----------------------------------------------------
+        # Verificar capacidad si es privilegiado
+        # ----------------------------------------------------
+
+        if is_privileged_port "$NEW_PORT"; then
+
+            if ! grep -Eq \
+                '^[[:space:]]*CapabilityBoundingSet=.*CAP_NET_BIND_SERVICE' \
+                "$path"; then
+
+                error_message \
+                    "No se detectó CAP_NET_BIND_SERVICE."
+
+                return 1
+            fi
+
+            if ! grep -Eq \
+                '^[[:space:]]*AmbientCapabilities=.*CAP_NET_BIND_SERVICE' \
+                "$path"; then
+
+                error_message \
+                    "No se detectó AmbientCapabilities=CAP_NET_BIND_SERVICE."
+
+                return 1
+            fi
+
+            success \
+                "Permiso para puerto privilegiado verificado."
+        fi
+
     # --------------------------------------------------------
-    # VERIFICAR PUERTO DESTINO
+    # Verificar puerto destino
     # --------------------------------------------------------
 
     else
 
+        final_target="$(
+            get_service_target_port "$path"
+        )"
+
+        if [[ "$final_target" != "$NEW_PORT" ]]; then
+
+            error_message \
+                "El puerto destino configurado no coincide."
+
+            detail \
+                "Esperado: ${NEW_PORT}"
+
+            detail \
+                "Detectado: ${final_target:-desconocido}"
+
+            return 1
+        fi
+
+        success \
+            "Puerto destino configurado: ${NEW_PORT}"
+
         if check_port_usage "$NEW_PORT"; then
 
             success \
-                "El puerto destino ${NEW_PORT} está siendo utilizado por un servicio."
+                "Existe un servicio escuchando en el puerto destino."
 
         else
 
             warning \
-                "No se detectó un servicio escuchando en el puerto destino ${NEW_PORT}."
+                "No se detectó escucha en el puerto destino."
 
             detail \
-                "La configuración fue aplicada correctamente."
+                "La configuración de HCR sí fue aplicada."
 
         fi
+    fi
+
+    # --------------------------------------------------------
+    # Verificar nombre
+    # --------------------------------------------------------
+
+    if [[ "$PORT_TYPE" == "hcr" ]]; then
+
+        if [[ ! -f "$NEW_UNIT_PATH" ]]; then
+
+            error_message \
+                "La nueva unidad ${NEW_SERVICE} no existe."
+
+            return 1
+        fi
+
+        if [[ -f "$OLD_UNIT_PATH" ]]; then
+
+            error_message \
+                "La unidad anterior ${OLD_SERVICE} todavía existe."
+
+            return 1
+        fi
+
+        success \
+            "Nombre de instancia actualizado: ${NEW_SERVICE}"
+
     fi
 }
 
@@ -1148,16 +1462,22 @@ verify_service() {
 # ============================================================
 
 remove_backup() {
-    if [[ -f "$BACKUP_PATH" ]]; then
 
-        if ! rm -f -- "$BACKUP_PATH"; then
+    if [[ -n "$BACKUP_PATH" &&
+          -f "$BACKUP_PATH" ]]; then
+
+        if rm -f -- "$BACKUP_PATH"; then
+
+            success \
+                "Respaldo temporal eliminado."
+
+        else
 
             warning \
-                "No se pudo eliminar el archivo de respaldo."
+                "No se pudo eliminar el respaldo."
 
             detail \
                 "Backup conservado: ${BACKUP_PATH}"
-
         fi
     fi
 }
@@ -1167,65 +1487,50 @@ remove_backup() {
 # ============================================================
 
 show_summary() {
+
     printf '\n'
 
     line
 
-    if [[ "${PORT_TYPE}" == "hcr" ]]; then
-
-        printf '%b\n' \
-            "${BRIGHT_GREEN}${BOLD}✔ PUERTO HCR CONFIGURADO CORRECTAMENTE${RESET}"
-
-    else
-
-        printf '%b\n' \
-            "${BRIGHT_GREEN}${BOLD}✔ PUERTO DESTINO CONFIGURADO CORRECTAMENTE${RESET}"
-
-    fi
+    printf '%b\n' \
+        "${BRIGHT_GREEN}${BOLD}✔ CAMBIO COMPLETADO CORRECTAMENTE${RESET}"
 
     printf '\n'
 
-    detail \
-        "Servicio: ${SERVICE_NAME}"
-
-    if [[ "${PORT_TYPE}" == "hcr" ]]; then
+    if [[ "$PORT_TYPE" == "hcr" ]]; then
 
         detail \
-            "Anterior: ${CURRENT_PORT:-desconocido}"
+            "Instancia anterior: ${OLD_SERVICE}"
 
         detail \
-            "Nuevo:    ${NEW_PORT}"
+            "Instancia nueva:    ${NEW_SERVICE}"
 
         detail \
-            "Tipo:     Puerto HCR"
+            "Puerto anterior:    ${CURRENT_PORT}"
 
-        if is_privileged_port "$NEW_PORT"; then
-
-            detail \
-                "Permiso:  CAP_NET_BIND_SERVICE"
-
-        fi
+        detail \
+            "Puerto nuevo:       ${NEW_PORT}"
 
     else
 
         detail \
-            "Anterior: ${CURRENT_TARGET_PORT:-desconocido}"
+            "Instancia:           ${OLD_SERVICE}"
 
         detail \
-            "Nuevo:    ${NEW_PORT}"
+            "Puerto destino anterior: ${CURRENT_TARGET_PORT}"
 
         detail \
-            "Tipo:     Puerto destino"
+            "Puerto destino nuevo:    ${NEW_PORT}"
 
     fi
 
     detail \
-        "Estado:   activo"
+        "Estado:              activo"
 
     printf '\n'
 
     printf '%b\n' \
-        "${DIM}La nueva configuración ya está aplicada al servicio.${RESET}"
+        "${DIM}La instancia existente fue modificada; no se creó una instancia adicional.${RESET}"
 
     line
 
@@ -1237,13 +1542,12 @@ show_summary() {
 # ============================================================
 
 main() {
+
     header
 
     validate_environment
-    validate_service
 
-    CURRENT_PORT="$(get_current_port)"
-    CURRENT_TARGET_PORT="$(get_current_target_port)"
+    select_service
 
     select_port_type
 
@@ -1253,13 +1557,19 @@ main() {
 
     create_backup
 
-    change_port
+    stop_selected_service
+
+    modify_unit_configuration
+
+    verify_modified_configuration
+
+    rename_unit
 
     reload_systemd
 
-    restart_service
+    start_modified_service
 
-    verify_service
+    verify_final_state
 
     remove_backup
 
