@@ -36,7 +36,16 @@ set -euo pipefail
 #   - Estado real mediante ss
 #   - Interfaz
 #   - Descarga y ejecución de scripts
-#   - Selección de instancia para optimización
+#
+# optimize.sh contiene toda la lógica de optimización.
+#
+# El panel NO:
+#
+#   - Modifica optimize.sh
+#   - Inyecta UNIT_PATH
+#   - Inyecta SERVICE_NAME
+#   - Selecciona una instancia para optimize.sh
+#   - Ejecuta lógica de optimización internamente
 #
 # ============================================================
 
@@ -684,95 +693,6 @@ show_instances() {
 }
 
 # ============================================================
-# SELECCIONAR UNIDAD
-# ============================================================
-
-select_hcr_unit() {
-
-    local title="${1:-Seleccionar instancia}"
-    local units
-
-    units="$(get_hcr_units)"
-
-    if [[ -z "$units" ]]; then
-
-        warning "No existen instancias HCR Server disponibles."
-
-        return 1
-    fi
-
-    echo
-    echo -e "  ${BOLD}${WHITE}${title}${RESET}"
-    echo
-
-    local index=0
-    local unit
-    local path
-    local port
-    local state_display
-
-    declare -a UNIT_ARRAY=()
-
-    while IFS= read -r unit; do
-
-        [[ -n "$unit" ]] || continue
-
-        index=$((index + 1))
-
-        UNIT_ARRAY[$index]="$unit"
-
-        path="$(get_unit_path "$unit")"
-        port="$(get_unit_listen_port "$unit" "$path")"
-
-        if [[ "$port" =~ ^[0-9]+$ ]] &&
-           is_port_listening "$port"; then
-
-            state_display="${GREEN}ACTIVO${RESET}"
-
-        else
-
-            state_display="${YELLOW}INACTIVO${RESET}"
-
-        fi
-
-        printf "  ${CYAN}%02d${RESET}  ${WHITE}Puerto %-6s${RESET} ${GRAY}%-28s${RESET} %b\n" \
-            "$index" \
-            "${port:----}" \
-            "(${unit})" \
-            "$state_display"
-
-    done <<< "$units"
-
-    echo
-    echo -e "  ${GRAY}00  Cancelar${RESET}"
-    echo
-
-    local option
-
-    while true; do
-
-        read -rp "  Selecciona una instancia: " option
-
-        if [[ "$option" == "0" || "$option" == "00" ]]; then
-            return 1
-        fi
-
-        if [[ "$option" =~ ^[0-9]+$ ]] &&
-           (( option >= 1 && option <= index )); then
-
-            SELECTED_UNIT="${UNIT_ARRAY[$option]}"
-            SELECTED_PATH="$(get_unit_path "$SELECTED_UNIT")"
-            SELECTED_PORT="$(get_unit_listen_port "$SELECTED_UNIT" "$SELECTED_PATH")"
-
-            return 0
-        fi
-
-        error "Selección no válida."
-
-    done
-}
-
-# ============================================================
 # DESCARGA GENÉRICA
 # ============================================================
 
@@ -818,27 +738,13 @@ download_file() {
 # EJECUTAR SCRIPT REMOTO
 # ============================================================
 #
-# IMPORTANTE:
+# Esta función únicamente:
 #
-# Esta función ahora permite pasar argumentos al script remoto.
-#
-# Ejemplo:
-#
-#   run_remote \
-#       "gestor" \
-#       "https://..." \
-#       "/tmp/script.sh" \
-#       start
-#
-# Ejecutará:
-#
-#   bash /tmp/script.sh start
-#
-# Esto es necesario para scripts que exigen:
-#
-#   start
-#   stop
-#   toggle
+#   - Descarga el script
+#   - Le da permisos
+#   - Lo ejecuta
+#   - Pasa argumentos si existen
+#   - Elimina el temporal
 #
 # ============================================================
 
@@ -1334,27 +1240,6 @@ show_general_status() {
 # ============================================================
 # INICIAR / DETENER SERVICIO
 # ============================================================
-#
-# CORRECCIÓN:
-#
-# start-stop-service.sh requiere:
-#
-#   start
-#   stop
-#   toggle
-#
-# Antes el panel ejecutaba:
-#
-#   bash start-stop-service.sh
-#
-# Eso provocaba:
-#
-#   Uso: start-stop-service.sh {start|stop|toggle}
-#
-# Ahora el panel selecciona explícitamente la acción y la
-# transmite al script remoto.
-#
-# ============================================================
 
 start_stop_service() {
 
@@ -1479,88 +1364,15 @@ restart_service() {
 }
 
 # ============================================================
-# PREPARAR OPTIMIZADOR
-# ============================================================
-
-prepare_instance_optimizer() {
-
-    local unit_path="$1"
-    local unit_name="$2"
-
-    prepare_install_dir
-
-    rm -f "$OPTIMIZE_SCRIPT"
-
-    spinner_start "Preparando optimizador para ${unit_name}..."
-
-    if ! curl -fL \
-        --retry 3 \
-        --connect-timeout 15 \
-        --max-time 120 \
-        -sS \
-        "${BASE_URL}/optimize.sh" \
-        -o "$OPTIMIZE_SCRIPT"; then
-
-        spinner_stop
-
-        rm -f "$OPTIMIZE_SCRIPT"
-
-        error "No se pudo descargar el optimizador."
-
-        return 1
-    fi
-
-    if [[ ! -s "$OPTIMIZE_SCRIPT" ]]; then
-
-        spinner_stop
-
-        rm -f "$OPTIMIZE_SCRIPT"
-
-        error "El optimizador descargado está vacío."
-
-        return 1
-    fi
-
-    if ! sed -E \
-        -i \
-        "s#^UNIT_PATH=.*#UNIT_PATH=\"${unit_path}\"#" \
-        "$OPTIMIZE_SCRIPT"; then
-
-        spinner_stop
-
-        rm -f "$OPTIMIZE_SCRIPT"
-
-        error "No se pudo preparar UNIT_PATH."
-
-        return 1
-    fi
-
-    if ! sed -E \
-        -i \
-        "s#^SERVICE_NAME=.*#SERVICE_NAME=\"${unit_name%.service}\"#" \
-        "$OPTIMIZE_SCRIPT"; then
-
-        spinner_stop
-
-        rm -f "$OPTIMIZE_SCRIPT"
-
-        error "No se pudo preparar SERVICE_NAME."
-
-        return 1
-    fi
-
-    chmod 700 "$OPTIMIZE_SCRIPT"
-    chown root:root "$OPTIMIZE_SCRIPT"
-
-    spinner_stop
-
-    success "Optimizador preparado."
-
-    return 0
-}
-
-# ============================================================
 # OPTIMIZAR HCR
+# ============================================================
+#
+# El panel NO contiene lógica de optimización.
+#
+# Toda la lógica pertenece exclusivamente a optimize.sh.
+#
+# El panel solamente descarga y ejecuta el script.
+#
 # ============================================================
 
 optimize_service() {
@@ -1568,78 +1380,26 @@ optimize_service() {
     header
 
     echo -e "  ${BOLD}${WHITE}OPTIMIZAR HCR${RESET}"
-    echo -e "  ${GRAY}Ajusta rendimiento de una instancia HCR específica.${RESET}"
+    echo -e "  ${GRAY}Ejecuta el optimizador oficial de HCR Server.${RESET}"
     echo
 
-    if ! select_hcr_unit "Selecciona la instancia que deseas optimizar"; then
-
-        info "Operación cancelada."
-
-        pause
-
-        return
-    fi
-
-    local unit="$SELECTED_UNIT"
-    local path="$SELECTED_PATH"
-    local port="$SELECTED_PORT"
-
-    local frame
-    local timeout
-    local target
-    local transport
-
-    frame="$(get_unit_frame "$path")"
-    timeout="$(get_unit_timeout "$path")"
-    target="$(get_unit_target_port "$unit" "$path")"
-    transport="$(get_unit_transport "$path")"
-
-    echo
-
-    echo -e "  ${BOLD}${WHITE}CONFIGURACIÓN DETECTADA${RESET}"
-    echo
-
-    detail "Instancia: ${unit}"
-    detail "Puerto HCR: ${port:----}"
-    detail "Puerto destino: ${target:----}"
-    detail "Transporte: ${transport:----}"
-    detail "Max Download Frame: ${frame:-no configurado}"
-    detail "Download Poll Timeout: ${timeout:-no configurado}"
-
-    echo
-
-    if [[ -z "$path" || ! -f "$path" ]]; then
-
-        error "No se pudo localizar la unidad de systemd."
-
-        pause
-
-        return
-    fi
-
-    echo
-
-    if ! prepare_instance_optimizer "$path" "$unit"; then
-
-        pause
-
-        return
-    fi
-
-    echo
-
-    bash "$OPTIMIZE_SCRIPT"
+    run_remote \
+        "optimizador HCR" \
+        "${BASE_URL}/optimize.sh" \
+        "$OPTIMIZE_SCRIPT"
 
     local result=$?
-
-    rm -f "$OPTIMIZE_SCRIPT"
 
     echo
 
     if (( result == 0 )); then
-        success "Optimización finalizada."
+
+        success "El optimizador terminó correctamente."
+
     else
+
         error "El optimizador terminó con errores."
+
     fi
 
     pause
@@ -1689,7 +1449,7 @@ show_menu() {
 
     printf "  ${CYAN}07${RESET}  ${MAGENTA}⚙${RESET}  ${WHITE}%-24s${RESET}\n" \
         "Optimizar HCR"
-    echo -e "      ${GRAY}Ajusta el rendimiento del Protocolo.${RESET}"
+    echo -e "      ${GRAY}Ejecuta el optimizador oficial.${RESET}"
     echo
 
     echo -e "  ${DARK}────────────────────────────────────────────────────────${RESET}"
