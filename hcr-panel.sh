@@ -209,7 +209,8 @@ get_hcr_units() {
             -maxdepth 1 \
             -type f \
             -name 'hcr-server-*.service' \
-            -printf '%f\n' 2>/dev/null || true
+            -printf '%f\n' 2>/dev/null ||
+            true
 
     } |
     sort -u
@@ -264,7 +265,8 @@ get_unit_path() {
             --property=FragmentPath \
             --value \
             "$unit" \
-            2>/dev/null || true
+            2>/dev/null ||
+            true
     )"
 
     if [[ -n "$path" && -f "$path" ]]; then
@@ -302,7 +304,8 @@ get_unit_listen_port() {
         -- '--listen[[:space:]]+:[0-9]+' \
         "$path" 2>/dev/null |
         grep -oE '[0-9]+$' |
-        head -n1 || true
+        head -n1 ||
+        true
 }
 
 # ============================================================
@@ -322,7 +325,8 @@ get_unit_target_port() {
         -- '--target[[:space:]]+127\.0\.0\.1:[0-9]+' \
         "$path" 2>/dev/null |
         grep -oE '[0-9]+$' |
-        head -n1 || true
+        head -n1 ||
+        true
 }
 
 # ============================================================
@@ -342,7 +346,8 @@ get_unit_transport() {
         -- '--transport[[:space:]]+[a-zA-Z0-9_-]+' \
         "$path" 2>/dev/null |
         awk '{print $2}' |
-        head -n1 || true
+        head -n1 ||
+        true
 }
 
 # ============================================================
@@ -362,7 +367,8 @@ get_unit_frame() {
         -- '--max-download-frame[[:space:]]+[0-9]+' \
         "$path" 2>/dev/null |
         grep -oE '[0-9]+$' |
-        head -n1 || true
+        head -n1 ||
+        true
 }
 
 # ============================================================
@@ -382,40 +388,34 @@ get_unit_timeout() {
         -- '--download-poll-timeout[[:space:]]+[0-9]+(ms|s|m|h)' \
         "$path" 2>/dev/null |
         grep -oE '[0-9]+(ms|s|m|h)$' |
-        head -n1 || true
-}
-
-# ============================================================
-# ESTADO SYSTEMD
-# ============================================================
-
-get_unit_state() {
-
-    local unit="$1"
-
-    systemctl is-active "$unit" 2>/dev/null || true
+        head -n1 ||
+        true
 }
 
 # ============================================================
 # COMPROBAR LISTENER
+# ============================================================
+#
+# 0 = existe listener
+# 1 = no existe listener
+#
+# La comprobación se hace directamente contra ss.
+#
 # ============================================================
 
 is_port_listening() {
 
     local port="$1"
 
-    [[ -n "$port" ]] || return 1
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
 
     ss -H -lnt 2>/dev/null |
         awk -v port="$port" '
             {
                 address = $4
 
-                if (
-                    address ~ (":" port "$") ||
-                    address ~ ("\\]:" port "$")
-                ) {
-                    found=1
+                if (address ~ (":" port "$")) {
+                    found = 1
                     exit
                 }
             }
@@ -432,11 +432,6 @@ is_port_listening() {
 # ============================================================
 # OBTENER TODOS LOS PUERTOS HCR
 # ============================================================
-#
-# IMPORTANTE:
-#
-# Esta función muestra TODOS los puertos definidos en las
-# unidades HCR, independientemente de que estén activos o no.
 #
 # Devuelve:
 #
@@ -464,7 +459,7 @@ get_hcr_ports() {
 
         port="$(get_unit_listen_port "$unit" "$path")"
 
-        [[ -n "$port" ]] || continue
+        [[ "$port" =~ ^[0-9]+$ ]] || continue
 
         if is_port_listening "$port"; then
             echo "${port}|activo"
@@ -507,22 +502,30 @@ header() {
     echo -e "${CYAN}    │${RESET}  ${WHITE}Puertos:${RESET}                                          ${CYAN}│${RESET}"
 
     # --------------------------------------------------------
-    # MOSTRAR TODOS LOS PUERTOS
-    # VERDE = ACTIVO
-    # AMARILLO = INACTIVO
+    # PUERTOS
+    #
+    # ACTIVOS:
+    #   Se muestran primero.
+    #   Color verde.
+    #
+    # INACTIVOS:
+    #   Se muestran debajo.
+    #   Color amarillo.
+    #
+    # Todos los puertos de cada grupo se colocan
+    # horizontalmente en la misma línea.
     # --------------------------------------------------------
 
     local port_data
     local port
     local state
 
+    local active_ports=""
+    local inactive_ports=""
+
     port_data="$(get_hcr_ports)"
 
-    if [[ -z "$port_data" ]]; then
-
-        echo -e "${CYAN}    │${RESET}      ${GRAY}---${RESET}                                               ${CYAN}│${RESET}"
-
-    else
+    if [[ -n "$port_data" ]]; then
 
         while IFS='|' read -r port state; do
 
@@ -530,11 +533,19 @@ header() {
 
             if [[ "$state" == "activo" ]]; then
 
-                echo -e "${CYAN}    │${RESET}      ${GREEN}● ${port}${RESET} ${GRAY}(activo)${RESET}                              ${CYAN}│${RESET}"
+                if [[ -n "$active_ports" ]]; then
+                    active_ports+="  "
+                fi
+
+                active_ports+="${GREEN}● ${port}${RESET}"
 
             else
 
-                echo -e "${CYAN}    │${RESET}      ${YELLOW}● ${port}${RESET} ${GRAY}(inactivo)${RESET}                            ${CYAN}│${RESET}"
+                if [[ -n "$inactive_ports" ]]; then
+                    inactive_ports+="  "
+                fi
+
+                inactive_ports+="${YELLOW}● ${port}${RESET}"
 
             fi
 
@@ -542,41 +553,32 @@ header() {
 
     fi
 
+    # --------------------------------------------------------
+    # ACTIVOS
+    # --------------------------------------------------------
+
+    if [[ -n "$active_ports" ]]; then
+        echo -e "${CYAN}    │${RESET}  ${active_ports}"
+    fi
+
+    # --------------------------------------------------------
+    # INACTIVOS
+    # --------------------------------------------------------
+
+    if [[ -n "$inactive_ports" ]]; then
+        echo -e "${CYAN}    │${RESET}  ${inactive_ports}"
+    fi
+
+    # --------------------------------------------------------
+    # SI NO EXISTE NINGÚN PUERTO
+    # --------------------------------------------------------
+
+    if [[ -z "$active_ports" && -z "$inactive_ports" ]]; then
+        echo -e "${CYAN}    │${RESET}  ${GRAY}Sin puertos configurados${RESET}"
+    fi
+
     echo -e "${CYAN}    ╰────────────────────────────────────────────────────────╯${RESET}"
     echo
-}
-
-# ============================================================
-# ESTADO REAL
-# ============================================================
-
-get_port_state() {
-
-    local unit="$1"
-    local path="$2"
-
-    local systemd_state
-    local port
-
-    systemd_state="$(get_unit_state "$unit")"
-    port="$(get_unit_listen_port "$unit" "$path")"
-
-    if [[ "$systemd_state" == "active" ]]; then
-
-        if is_port_listening "$port"; then
-            echo "ACTIVO"
-        else
-            echo "SIN ESCUCHA"
-        fi
-
-    elif [[ "$systemd_state" == "failed" ]]; then
-
-        echo "ERROR"
-
-    else
-
-        echo "DETENIDO"
-    fi
 }
 
 # ============================================================
@@ -598,11 +600,10 @@ show_instances() {
         return 1
     fi
 
-    printf "  ${GRAY}%-4s %-12s %-14s %-14s %-10s %-10s %-10s${RESET}\n" \
+    printf "  ${GRAY}%-4s %-12s %-14s %-10s %-10s %-10s${RESET}\n" \
         "#" \
         "PUERTO" \
         "DESTINO" \
-        "ESTADO" \
         "FRAME" \
         "TIMEOUT" \
         "TRANSP."
@@ -614,11 +615,9 @@ show_instances() {
     local path
     local port
     local target
-    local state
     local frame
     local timeout
     local transport
-    local state_display
 
     while IFS= read -r unit; do
 
@@ -630,35 +629,14 @@ show_instances() {
 
         port="$(get_unit_listen_port "$unit" "$path")"
         target="$(get_unit_target_port "$unit" "$path")"
-        state="$(get_port_state "$unit" "$path")"
         frame="$(get_unit_frame "$path")"
         timeout="$(get_unit_timeout "$path")"
         transport="$(get_unit_transport "$path")"
 
-        case "$state" in
-
-            ACTIVO)
-                state_display="${GREEN}ACTIVO${RESET}"
-                ;;
-
-            SIN\ ESCUCHA)
-                state_display="${YELLOW}SIN ESCUCHA${RESET}"
-                ;;
-
-            ERROR)
-                state_display="${RED}ERROR${RESET}"
-                ;;
-
-            *)
-                state_display="${GRAY}DETENIDO${RESET}"
-                ;;
-        esac
-
-        printf "  ${CYAN}%-4s${RESET} ${WHITE}%-12s${RESET} ${WHITE}%-14s${RESET} %-14b ${WHITE}%-10s${RESET} ${WHITE}%-10s${RESET} ${WHITE}%-10s${RESET}\n" \
+        printf "  ${CYAN}%-4s${RESET} ${WHITE}%-12s${RESET} ${WHITE}%-14s${RESET} ${WHITE}%-10s${RESET} ${WHITE}%-10s${RESET} ${WHITE}%-10s${RESET}\n" \
             "$index" \
             "${port:----}" \
             "${target:----}" \
-            "$state_display" \
             "${frame:----}" \
             "${timeout:----}" \
             "${transport:----}"
@@ -667,7 +645,6 @@ show_instances() {
 
     echo
     detail "Destino = redirección local 127.0.0.1:PUERTO"
-    detail "ACTIVO = systemd activo y puerto realmente escuchando."
 }
 
 # ============================================================
@@ -694,7 +671,6 @@ select_hcr_unit() {
     local unit
     local path
     local port
-    local state
     local state_display
 
     declare -a UNIT_ARRAY
@@ -709,26 +685,12 @@ select_hcr_unit() {
 
         path="$(get_unit_path "$unit")"
         port="$(get_unit_listen_port "$unit" "$path")"
-        state="$(get_port_state "$unit" "$path")"
 
-        case "$state" in
-
-            ACTIVO)
-                state_display="${GREEN}ACTIVO${RESET}"
-                ;;
-
-            SIN\ ESCUCHA)
-                state_display="${YELLOW}SIN ESCUCHA${RESET}"
-                ;;
-
-            ERROR)
-                state_display="${RED}ERROR${RESET}"
-                ;;
-
-            *)
-                state_display="${GRAY}DETENIDO${RESET}"
-                ;;
-        esac
+        if is_port_listening "$port"; then
+            state_display="${GREEN}ACTIVO${RESET}"
+        else
+            state_display="${YELLOW}INACTIVO${RESET}"
+        fi
 
         printf "  ${CYAN}%02d${RESET}  ${WHITE}Puerto %-6s${RESET} ${GRAY}%-28s${RESET} %b\n" \
             "$index" \
@@ -1014,7 +976,8 @@ uninstall_service() {
     run_remote \
         "desinstalador" \
         "${BASE_URL}/uninstall.sh" \
-        "$UNINSTALL_SCRIPT" || true
+        "$UNINSTALL_SCRIPT" ||
+        true
 
     echo
 
@@ -1110,7 +1073,8 @@ add_port() {
     run_remote \
         "gestor de nuevos puertos" \
         "${BASE_URL}/add-port.sh" \
-        "$ADD_PORT_SCRIPT" || true
+        "$ADD_PORT_SCRIPT" ||
+        true
 
     echo
 
@@ -1132,7 +1096,8 @@ start_stop_port() {
     run_remote \
         "gestor de inicio / detención de puerto" \
         "${BASE_URL}/start-stop-port.sh" \
-        "$START_STOP_PORT_SCRIPT" || true
+        "$START_STOP_PORT_SCRIPT" ||
+        true
 
     echo
 
@@ -1154,7 +1119,8 @@ modify_port() {
     run_remote \
         "gestor de modificación de puerto" \
         "${BASE_URL}/change-port.sh" \
-        "$CHANGE_PORT_SCRIPT" || true
+        "$CHANGE_PORT_SCRIPT" ||
+        true
 
     echo
 
@@ -1176,7 +1142,8 @@ delete_port() {
     run_remote \
         "eliminador de puerto" \
         "${BASE_URL}/delete-port.sh" \
-        "$DELETE_PORT_SCRIPT" || true
+        "$DELETE_PORT_SCRIPT" ||
+        true
 
     echo
 
@@ -1198,7 +1165,8 @@ show_general_status() {
     run_remote \
         "gestor de estados de puertos" \
         "${BASE_URL}/status-port.sh" \
-        "$STATUS_PORT_SCRIPT" || true
+        "$STATUS_PORT_SCRIPT" ||
+        true
 
     echo
 
@@ -1220,7 +1188,8 @@ start_stop_service() {
     run_remote \
         "gestor de inicio / detención del servicio" \
         "${BASE_URL}/start-stop-service.sh" \
-        "$START_STOP_SERVICE_SCRIPT" || true
+        "$START_STOP_SERVICE_SCRIPT" ||
+        true
 
     echo
 
@@ -1242,7 +1211,8 @@ restart_service() {
     run_remote \
         "gestor de reinicio del servicio" \
         "${BASE_URL}/restart-service.sh" \
-        "$RESTART_SERVICE_SCRIPT" || true
+        "$RESTART_SERVICE_SCRIPT" ||
+        true
 
     echo
 
@@ -1514,15 +1484,3 @@ main() {
 # ============================================================
 
 main "$@"
-
-El cambio importante está concentrado en "get_hcr_ports()" y "header()".
-
-Ahora, por ejemplo, si tienes:
-
-- "8080" escuchando → 🟢 8080 (activo)
-- "8880" detenido → 🟡 8880 (inactivo)
-- "1443" escuchando → 🟢 1443 (activo)
-
-El encabezado mostrará los tres, no solamente los que estén escuchando.
-
-Además, no cambié la lógica de los scripts externos ("add-port.sh", "start-stop-port.sh", "change-port.sh", etc.); el panel continúa funcionando como launcher y solamente utiliza la detección local para construir el encabezado.
