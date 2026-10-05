@@ -7,11 +7,9 @@ set +o pipefail
 # HCR SERVER — PREMIUM CONTROL PANEL
 # ============================================================
 #
-# PANEL PRINCIPAL
+# PANEL PRINCIPAL / LAUNCHER
 #
-# Este script SOLO funciona como panel/launcher.
-#
-# NO contiene la lógica interna de:
+# El panel NO contiene la lógica interna de:
 #
 #   - Añadir puertos
 #   - Modificar puertos
@@ -22,9 +20,33 @@ set +o pipefail
 #   - Reiniciar servicios
 #   - Optimizar instancias
 #
-# Cada función es ejecutada por su script independiente.
+# Todas esas funciones son ejecutadas mediante scripts
+# independientes descargados temporalmente desde GitHub.
 #
 # ============================================================
+#
+# ARQUITECTURA:
+#
+#   /root/.hcr-panel/
+#   ├── install.sh
+#   └── .tmp/
+#       ├── uninstall.sh
+#       ├── port-management.sh
+#       ├── status-port.sh
+#       ├── start-stop-service.sh
+#       ├── restart-service.sh
+#       └── optimize.sh
+#
+# Los archivos anteriores son recursos TEMPORALES del panel.
+#
+# El panel NO descarga:
+#
+#   /root/.hcr-panel/hcr-server
+#
+# El binario HCR es responsabilidad de install.sh.
+#
+# ============================================================
+
 
 # ============================================================
 # CONFIGURACIÓN
@@ -38,10 +60,10 @@ TEMP_DIR="${INSTALL_DIR}/.tmp"
 SYSTEMD_DIR="/etc/systemd/system"
 
 # ------------------------------------------------------------
-# Scripts independientes
+# Recursos temporales
 # ------------------------------------------------------------
 
-INSTALL_SCRIPT="${INSTALL_DIR}/install.sh"
+INSTALL_SCRIPT="${TEMP_DIR}/install.sh"
 
 UNINSTALL_SCRIPT="${TEMP_DIR}/uninstall.sh"
 PORT_MANAGEMENT_SCRIPT="${TEMP_DIR}/port-management.sh"
@@ -51,10 +73,25 @@ RESTART_SERVICE_SCRIPT="${TEMP_DIR}/restart-service.sh"
 OPTIMIZE_SCRIPT="${TEMP_DIR}/optimize.sh"
 
 # ------------------------------------------------------------
+# Lista de recursos
+# ------------------------------------------------------------
+
+declare -a PANEL_RESOURCES=(
+    "install.sh"
+    "uninstall.sh"
+    "port-management.sh"
+    "status-port.sh"
+    "start-stop-service.sh"
+    "restart-service.sh"
+    "optimize.sh"
+)
+
+# ------------------------------------------------------------
 # Spinner
 # ------------------------------------------------------------
 
 SPINNER_PID=""
+
 
 # ============================================================
 # COLORES
@@ -73,13 +110,16 @@ WHITE='\033[38;5;255m'
 GRAY='\033[38;5;245m'
 DARK='\033[38;5;240m'
 
+
 # ============================================================
 # UTILIDADES
 # ============================================================
 
 clear_screen() {
+
     clear 2>/dev/null || true
 }
+
 
 pause() {
 
@@ -89,11 +129,13 @@ pause() {
         "  Presiona ENTER para continuar..." _
 }
 
+
 success() {
 
     echo -e \
         "  ${GREEN}✔${RESET} $1"
 }
+
 
 error() {
 
@@ -101,11 +143,13 @@ error() {
         "  ${RED}✖${RESET} $1"
 }
 
+
 warning() {
 
     echo -e \
         "  ${YELLOW}⚠${RESET} $1"
 }
+
 
 info() {
 
@@ -113,11 +157,13 @@ info() {
         "  ${CYAN}●${RESET} $1"
 }
 
+
 detail() {
 
     echo -e \
         "      ${GRAY}•${RESET} $1"
 }
+
 
 line() {
 
@@ -125,19 +171,72 @@ line() {
         "  ${DARK}────────────────────────────────────────────────────────${RESET}"
 }
 
+
 # ============================================================
 # ROOT
 # ============================================================
 
 require_root() {
 
-    if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    local uid="${EUID:-$(id -u)}"
+
+    if [[ "$uid" -ne 0 ]]; then
 
         error "Este panel debe ejecutarse como root."
 
         exit 1
     fi
 }
+
+
+# ============================================================
+# COMPROBAR COMANDOS NECESARIOS
+# ============================================================
+
+check_dependencies() {
+
+    local missing=()
+
+    command -v curl >/dev/null 2>&1 ||
+        missing+=("curl")
+
+    command -v systemctl >/dev/null 2>&1 ||
+        missing+=("systemctl")
+
+    command -v awk >/dev/null 2>&1 ||
+        missing+=("awk")
+
+    command -v grep >/dev/null 2>&1 ||
+        missing+=("grep")
+
+    command -v sed >/dev/null 2>&1 ||
+        missing+=("sed")
+
+    command -v sort >/dev/null 2>&1 ||
+        missing+=("sort")
+
+    command -v paste >/dev/null 2>&1 ||
+        missing+=("paste")
+
+    command -v ss >/dev/null 2>&1 ||
+        missing+=("ss")
+
+    if (( ${#missing[@]} > 0 )); then
+
+        error "Faltan comandos necesarios:"
+
+        local item
+
+        for item in "${missing[@]}"; do
+            detail "$item"
+        done
+
+        return 1
+    fi
+
+    return 0
+}
+
 
 # ============================================================
 # DIRECTORIOS
@@ -146,6 +245,7 @@ require_root() {
 prepare_install_dir() {
 
     mkdir -p "$INSTALL_DIR" || return 1
+
     mkdir -p "$TEMP_DIR" || return 1
 
     chown root:root \
@@ -157,7 +257,54 @@ prepare_install_dir() {
         "$INSTALL_DIR" \
         "$TEMP_DIR" \
         2>/dev/null || true
+
+    return 0
 }
+
+
+# ============================================================
+# LIMPIAR RECURSOS TEMPORALES
+# ============================================================
+#
+# IMPORTANTE:
+#
+# No elimina:
+#
+#   /root/.hcr-panel
+#
+# No elimina:
+#
+#   servicios
+#   binarios HCR
+#   certificados
+#   archivos de systemd
+#
+# Solo elimina los recursos descargados temporalmente.
+#
+# ============================================================
+
+cleanup_resources() {
+
+    if [[ -n "${SPINNER_PID:-}" ]]; then
+
+        spinner_stop >/dev/null 2>&1 || true
+    fi
+
+    if [[ -d "$TEMP_DIR" ]]; then
+
+        rm -f \
+            "${TEMP_DIR}/install.sh" \
+            "${TEMP_DIR}/uninstall.sh" \
+            "${TEMP_DIR}/port-management.sh" \
+            "${TEMP_DIR}/status-port.sh" \
+            "${TEMP_DIR}/start-stop-service.sh" \
+            "${TEMP_DIR}/restart-service.sh" \
+            "${TEMP_DIR}/optimize.sh" \
+            "${TEMP_DIR}"/*.download \
+            2>/dev/null || true
+    fi
+}
+
 
 # ============================================================
 # SPINNER
@@ -167,7 +314,7 @@ spinner_start() {
 
     local message="${1:-Procesando}"
 
-    # Si ya existe un spinner, no crear otro.
+    # Si existe un spinner anterior, verificarlo.
     if [[ -n "${SPINNER_PID:-}" ]]; then
 
         if kill -0 "${SPINNER_PID}" >/dev/null 2>&1; then
@@ -205,6 +352,7 @@ spinner_start() {
             i=$(( (i + 1) % ${#frames[@]} ))
 
             sleep 0.08
+
         done
 
     ) &
@@ -212,24 +360,35 @@ spinner_start() {
     SPINNER_PID=$!
 }
 
+
 spinner_stop() {
 
     local pid="${SPINNER_PID:-}"
 
     SPINNER_PID=""
 
-    if [[ -n "$pid" ]]; then
+    # Si no existe PID, no intentar wait.
+    if [[ -z "$pid" ]]; then
+
+        printf "\r\033[2K"
+
+        return 0
+    fi
+
+    # Comprobar que el proceso exista antes de enviar TERM.
+    if kill -0 "$pid" >/dev/null 2>&1; then
 
         kill -TERM "$pid" \
             >/dev/null 2>&1 || true
 
+        # Solo hacer wait si el proceso es hijo válido.
         wait "$pid" \
             >/dev/null 2>&1 || true
     fi
 
-    # Limpia completamente la línea del spinner.
     printf "\r\033[2K"
 }
+
 
 # ============================================================
 # LIMPIEZA DE EMERGENCIA
@@ -237,24 +396,19 @@ spinner_stop() {
 
 cleanup() {
 
-    spinner_stop >/dev/null 2>&1 || true
+    cleanup_resources
 }
 
+
 trap cleanup EXIT
+
 trap 'exit 130' INT
+
 trap 'exit 143' TERM
+
 
 # ============================================================
 # OBTENER UNIDADES HCR
-# ============================================================
-#
-# Acepta:
-#
-#   hcr-server.service
-#   hcr-server-8080.service
-#   hcr-server-8880.service
-#   hcr-server-cualquier-sufijo.service
-#
 # ============================================================
 
 get_hcr_units() {
@@ -266,7 +420,8 @@ get_hcr_units() {
             --no-pager \
             2>/dev/null |
             awk '{print $1}' |
-            grep -E '^hcr-server(-[^[:space:]]+)?\.service$' ||
+            grep -E \
+                '^hcr-server(-[^[:space:]]+)?\.service$' ||
             true
 
         find "$SYSTEMD_DIR" \
@@ -278,9 +433,11 @@ get_hcr_units() {
             true
 
     } |
-    grep -E '^hcr-server(-[^[:space:]]+)?\.service$' |
+    grep -E \
+        '^hcr-server(-[^[:space:]]+)?\.service$' |
     sort -u
 }
+
 
 # ============================================================
 # CONTAR INSTANCIAS HCR
@@ -299,6 +456,7 @@ count_hcr_instances() {
     echo "${count:-0}"
 }
 
+
 # ============================================================
 # ESTADO DE INSTALACIÓN
 # ============================================================
@@ -312,6 +470,7 @@ hcr_is_installed() {
     [[ "$count" =~ ^[0-9]+$ ]] &&
         (( count > 0 ))
 }
+
 
 # ============================================================
 # RUTA DE UNIDAD
@@ -348,6 +507,7 @@ get_unit_path() {
     echo ""
 }
 
+
 # ============================================================
 # OBTENER PUERTO CONFIGURADO
 # ============================================================
@@ -358,6 +518,7 @@ get_unit_listen_port() {
     local path="$2"
 
     [[ -n "$path" ]] || return 0
+
     [[ -f "$path" ]] || return 0
 
     grep -oE \
@@ -369,8 +530,9 @@ get_unit_listen_port() {
         true
 }
 
+
 # ============================================================
-# COMPROBAR SI UN PUERTO ESTÁ ACTIVO
+# COMPROBAR PUERTO ACTIVO
 # ============================================================
 
 is_port_listening() {
@@ -402,6 +564,7 @@ is_port_listening() {
             }
         '
 }
+
 
 # ============================================================
 # OBTENER PUERTOS ACTIVOS
@@ -435,6 +598,7 @@ get_active_hcr_ports() {
     sort -n -u
 }
 
+
 # ============================================================
 # FORMATEAR PUERTOS
 # ============================================================
@@ -456,6 +620,7 @@ format_active_ports() {
         paste -sd ',' - |
         sed 's/,/, /g'
 }
+
 
 # ============================================================
 # ENCABEZADO
@@ -526,88 +691,22 @@ header() {
     echo
 }
 
+
 # ============================================================
-# DESCARGAR ARCHIVO
+# DESCARGAR RECURSO
 # ============================================================
 
-download_file() {
+download_resource() {
 
-    local url="$1"
+    local name="$1"
     local destination="$2"
+
+    local url="${BASE_URL}/${name}"
+    local temporary="${destination}.download"
 
     prepare_install_dir || return 1
 
-    rm -f "${destination}.download"
-
-    if ! curl \
-        -fL \
-        --retry 3 \
-        --connect-timeout 15 \
-        --max-time 120 \
-        -sS \
-        "$url" \
-        -o "${destination}.download"; then
-
-        rm -f "${destination}.download"
-
-        return 1
-    fi
-
-    if [[ ! -s "${destination}.download" ]]; then
-
-        rm -f "${destination}.download"
-
-        return 1
-    fi
-
-    chmod 700 \
-        "${destination}.download"
-
-    chown root:root \
-        "${destination}.download" \
-        2>/dev/null || true
-
-    mv -f \
-        "${destination}.download" \
-        "$destination"
-}
-
-# ============================================================
-# EJECUTAR SCRIPT REMOTO
-# ============================================================
-#
-# IMPORTANTE:
-#
-# El spinner SOLO se utiliza durante la descarga.
-#
-# NO se utiliza mientras el script externo está ejecutándose.
-#
-# Esto evita que:
-#
-#   ⠙ Ejecutando...
-#
-# se mezcle con la salida del script secundario.
-#
-# ============================================================
-
-run_remote() {
-
-    local name="$1"
-    local url="$2"
-    local path="$3"
-
-    prepare_install_dir || {
-
-        error "No se pudo preparar el directorio del panel."
-
-        return 1
-    }
-
-    echo
-
-    # --------------------------------------------------------
-    # DESCARGA
-    # --------------------------------------------------------
+    rm -f "$temporary"
 
     spinner_start \
         "Descargando ${name}..."
@@ -615,15 +714,16 @@ run_remote() {
     if ! curl \
         -fL \
         --retry 3 \
+        --retry-delay 1 \
         --connect-timeout 15 \
         --max-time 120 \
         -sS \
         "$url" \
-        -o "${path}.download"; then
+        -o "$temporary"; then
 
         spinner_stop
 
-        rm -f "${path}.download"
+        rm -f "$temporary"
 
         error "No se pudo descargar ${name}."
 
@@ -632,59 +732,271 @@ run_remote() {
 
     spinner_stop
 
-    # --------------------------------------------------------
-    # VALIDAR ARCHIVO
-    # --------------------------------------------------------
+    if [[ ! -f "$temporary" ]]; then
 
-    if [[ ! -s "${path}.download" ]]; then
-
-        rm -f "${path}.download"
-
-        error "El archivo descargado está vacío."
+        error "No se recibió ${name}."
 
         return 1
     fi
 
-    chmod 700 \
-        "${path}.download"
+    if [[ ! -s "$temporary" ]]; then
+
+        rm -f "$temporary"
+
+        error "El recurso ${name} está vacío."
+
+        return 1
+    fi
+
+    chmod 700 "$temporary"
 
     chown root:root \
-        "${path}.download" \
+        "$temporary" \
         2>/dev/null || true
 
     mv -f \
-        "${path}.download" \
-        "$path"
+        "$temporary" \
+        "$destination"
 
-    # --------------------------------------------------------
-    # EJECUCIÓN
-    # --------------------------------------------------------
-    #
-    # AQUÍ NO HAY SPINNER.
-    #
-    # El script externo tiene control completo de la terminal.
-    #
+    if [[ ! -s "$destination" ]]; then
+
+        error "No se pudo preparar ${name}."
+
+        return 1
+    fi
+
+    return 0
+}
+
+
+# ============================================================
+# DESCARGAR TODOS LOS RECURSOS
+# ============================================================
+#
+# Esta función prepara el panel completo.
+#
+# No descarga hcr-server.
+#
+# Descarga únicamente los componentes del panel.
+#
+# ============================================================
+
+download_all_resources() {
+
+    prepare_install_dir || {
+
+        error "No se pudo preparar el directorio temporal."
+
+        return 1
+    }
 
     echo
+
+    echo -e \
+        "  ${BOLD}${WHITE}PREPARANDO RECURSOS DEL PANEL${RESET}"
+
+    echo
+
+    local failed=0
+
+    # --------------------------------------------------------
+    # install.sh
+    # --------------------------------------------------------
+
+    if download_resource \
+        "install.sh" \
+        "$INSTALL_SCRIPT"; then
+
+        success "install.sh preparado."
+
+    else
+
+        failed=1
+    fi
+
+    # --------------------------------------------------------
+    # uninstall.sh
+    # --------------------------------------------------------
+
+    if download_resource \
+        "uninstall.sh" \
+        "$UNINSTALL_SCRIPT"; then
+
+        success "uninstall.sh preparado."
+
+    else
+
+        failed=1
+    fi
+
+    # --------------------------------------------------------
+    # port-management.sh
+    # --------------------------------------------------------
+
+    if download_resource \
+        "port-management.sh" \
+        "$PORT_MANAGEMENT_SCRIPT"; then
+
+        success "port-management.sh preparado."
+
+    else
+
+        failed=1
+    fi
+
+    # --------------------------------------------------------
+    # status-port.sh
+    # --------------------------------------------------------
+
+    if download_resource \
+        "status-port.sh" \
+        "$STATUS_PORT_SCRIPT"; then
+
+        success "status-port.sh preparado."
+
+    else
+
+        failed=1
+    fi
+
+    # --------------------------------------------------------
+    # start-stop-service.sh
+    # --------------------------------------------------------
+
+    if download_resource \
+        "start-stop-service.sh" \
+        "$START_STOP_SERVICE_SCRIPT"; then
+
+        success "start-stop-service.sh preparado."
+
+    else
+
+        failed=1
+    fi
+
+    # --------------------------------------------------------
+    # restart-service.sh
+    # --------------------------------------------------------
+
+    if download_resource \
+        "restart-service.sh" \
+        "$RESTART_SERVICE_SCRIPT"; then
+
+        success "restart-service.sh preparado."
+
+    else
+
+        failed=1
+    fi
+
+    # --------------------------------------------------------
+    # optimize.sh
+    # --------------------------------------------------------
+
+    if download_resource \
+        "optimize.sh" \
+        "$OPTIMIZE_SCRIPT"; then
+
+        success "optimize.sh preparado."
+
+    else
+
+        failed=1
+    fi
+
+    echo
+
+    if (( failed != 0 )); then
+
+        error "No se pudieron preparar todos los recursos."
+
+        return 1
+    fi
+
+    success "Todos los recursos del panel fueron preparados."
+
+    return 0
+}
+
+
+# ============================================================
+# VALIDAR RECURSO
+# ============================================================
+
+validate_resource() {
+
+    local path="$1"
+
+    [[ -f "$path" ]] ||
+        return 1
+
+    [[ -s "$path" ]] ||
+        return 1
+
+    return 0
+}
+
+
+# ============================================================
+# EJECUTAR RECURSO TEMPORAL
+# ============================================================
+#
+# NO descarga nuevamente el script.
+#
+# Usa el recurso que ya fue preparado.
+#
+# ============================================================
+
+run_resource() {
+
+    local name="$1"
+    local path="$2"
+
+    if ! validate_resource "$path"; then
+
+        error "El recurso temporal ${name} no está disponible."
+
+        echo
+
+        warning "Intentando descargarlo nuevamente..."
+
+        echo
+
+        if ! download_resource "$name" "$path"; then
+
+            error "No se pudo preparar ${name}."
+
+            return 1
+        fi
+    fi
+
+    chmod 700 "$path" 2>/dev/null || true
+
+    echo
+
     echo -e \
         "  ${CYAN}●${RESET} ${WHITE}Ejecutando ${name}...${RESET}"
 
     echo
 
+    # --------------------------------------------------------
+    # MUY IMPORTANTE:
+    #
+    # No existe spinner durante esta parte.
+    #
+    # El script secundario tiene control completo de la
+    # terminal.
+    # --------------------------------------------------------
+
     bash "$path"
 
     local result=$?
-
-    # --------------------------------------------------------
-    # LIMPIEZA
-    # --------------------------------------------------------
-
-    rm -f "$path"
 
     echo
 
     return "$result"
 }
+
 
 # ============================================================
 # OPCIÓN 01
@@ -703,27 +1015,25 @@ install_service() {
 
     echo
 
-    spinner_start \
-        "Descargando instalador..."
+    if ! validate_resource "$INSTALL_SCRIPT"; then
 
-    if ! download_file \
-        "${BASE_URL}/install.sh" \
-        "$INSTALL_SCRIPT"; then
+        warning "install.sh no está preparado."
 
-        spinner_stop
+        echo
 
-        error "No se pudo descargar install.sh."
+        if ! download_resource \
+            "install.sh" \
+            "$INSTALL_SCRIPT"; then
 
-        pause
+            error "No se pudo preparar install.sh."
 
-        return
+            pause
+
+            return
+        fi
     fi
 
-    spinner_stop
-
     echo
-
-    chmod 700 "$INSTALL_SCRIPT"
 
     echo -e \
         "  ${CYAN}●${RESET} ${WHITE}Ejecutando instalador...${RESET}"
@@ -745,12 +1055,13 @@ install_service() {
 
         error \
             "La instalación terminó con errores."
-    fi
 
-    rm -f "$INSTALL_SCRIPT"
+        detail "Código de salida: ${result}"
+    fi
 
     pause
 }
+
 
 # ============================================================
 # OPCIÓN 02
@@ -791,9 +1102,8 @@ uninstall_service() {
 
     echo
 
-    if run_remote \
-        "desinstalador" \
-        "${BASE_URL}/uninstall.sh" \
+    if run_resource \
+        "uninstall.sh" \
         "$UNINSTALL_SCRIPT"; then
 
         success \
@@ -807,6 +1117,7 @@ uninstall_service() {
 
     pause
 }
+
 
 # ============================================================
 # OPCIÓN 03
@@ -825,9 +1136,8 @@ port_management() {
 
     echo
 
-    if run_remote \
-        "gestor de puertos" \
-        "${BASE_URL}/port-management.sh" \
+    if run_resource \
+        "port-management.sh" \
         "$PORT_MANAGEMENT_SCRIPT"; then
 
         :
@@ -842,6 +1152,7 @@ port_management() {
 
     pause
 }
+
 
 # ============================================================
 # OPCIÓN 04
@@ -860,9 +1171,8 @@ status_ports() {
 
     echo
 
-    if run_remote \
-        "comprobador de estados de puertos" \
-        "${BASE_URL}/status-port.sh" \
+    if run_resource \
+        "status-port.sh" \
         "$STATUS_PORT_SCRIPT"; then
 
         :
@@ -877,6 +1187,7 @@ status_ports() {
 
     pause
 }
+
 
 # ============================================================
 # OPCIÓN 05
@@ -895,9 +1206,8 @@ start_stop_service() {
 
     echo
 
-    if run_remote \
-        "gestor de servicio HCR" \
-        "${BASE_URL}/start-stop-service.sh" \
+    if run_resource \
+        "start-stop-service.sh" \
         "$START_STOP_SERVICE_SCRIPT"; then
 
         :
@@ -912,6 +1222,7 @@ start_stop_service() {
 
     pause
 }
+
 
 # ============================================================
 # OPCIÓN 06
@@ -930,9 +1241,8 @@ restart_service() {
 
     echo
 
-    if run_remote \
-        "reiniciador del servicio HCR" \
-        "${BASE_URL}/restart-service.sh" \
+    if run_resource \
+        "restart-service.sh" \
         "$RESTART_SERVICE_SCRIPT"; then
 
         :
@@ -947,6 +1257,7 @@ restart_service() {
 
     pause
 }
+
 
 # ============================================================
 # OPCIÓN 07
@@ -965,9 +1276,8 @@ optimize_service() {
 
     echo
 
-    if run_remote \
-        "optimizador HCR" \
-        "${BASE_URL}/optimize.sh" \
+    if run_resource \
+        "optimize.sh" \
         "$OPTIMIZE_SCRIPT"; then
 
         :
@@ -982,6 +1292,7 @@ optimize_service() {
 
     pause
 }
+
 
 # ============================================================
 # MENÚ PRINCIPAL
@@ -1076,20 +1387,62 @@ show_menu() {
         "  ${CYAN}HCR ›${RESET} "
 }
 
+
+# ============================================================
+# PREPARACIÓN INICIAL
+# ============================================================
+
+initialize_panel() {
+
+    require_root
+
+    if ! check_dependencies; then
+
+        echo
+
+        error "El entorno no tiene todos los comandos necesarios."
+
+        exit 1
+    fi
+
+    if ! prepare_install_dir; then
+
+        error "No se pudo preparar el directorio del panel."
+
+        exit 1
+    fi
+
+    # --------------------------------------------------------
+    # Descargar TODOS los recursos al iniciar.
+    #
+    # Si alguno falla, el panel no continúa porque podría
+    # presentar funciones incompletas.
+    # --------------------------------------------------------
+
+    if ! download_all_resources; then
+
+        echo
+
+        error "No se pudo preparar completamente el panel."
+
+        exit 1
+    fi
+
+    echo
+
+    success "Panel preparado correctamente."
+
+    sleep 1
+}
+
+
 # ============================================================
 # MAIN
 # ============================================================
 
 main() {
 
-    require_root
-
-    prepare_install_dir || {
-
-        error "No se pudo preparar el directorio del panel."
-
-        exit 1
-    }
+    initialize_panel
 
     while true; do
 
@@ -1159,6 +1512,7 @@ main() {
 
     done
 }
+
 
 # ============================================================
 # EJECUCIÓN
