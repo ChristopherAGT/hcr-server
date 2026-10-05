@@ -9,8 +9,8 @@ set -euo pipefail
 #
 # USO:
 #
-#   hcr-service-control.sh start
-#   hcr-service-control.sh stop
+#   bash start-stop-service.sh start
+#   bash start-stop-service.sh stop
 #
 # EJEMPLO:
 #
@@ -19,7 +19,7 @@ set -euo pipefail
 #   hcr-server-1443.service
 #
 # El script detecta automáticamente TODAS las instancias
-# instaladas y ejecuta la acción solicitada sobre todas.
+# HCR instaladas y ejecuta la acción solicitada sobre todas.
 #
 # NO SOLICITA:
 #
@@ -38,7 +38,7 @@ set -euo pipefail
 #   - Modifica el binario.
 #   - Desinstala HCR.
 #
-# Solamente:
+# SOLAMENTE:
 #
 #   start -> inicia todas las instancias.
 #   stop  -> detiene todas las instancias.
@@ -184,7 +184,18 @@ spinner_start() {
 
     local message="$1"
 
+    if [[ -n "${SPINNER_PID:-}" ]]; then
+
+        if kill -0 "${SPINNER_PID}" >/dev/null 2>&1; then
+            return 0
+        fi
+
+        SPINNER_PID=""
+    fi
+
     (
+        trap 'exit 0' TERM INT HUP
+
         local frames=(
             "⠋"
             "⠙"
@@ -218,18 +229,30 @@ spinner_start() {
 
 spinner_stop() {
 
-    if [[ -n "${SPINNER_PID}" ]]; then
+    local pid="${SPINNER_PID:-}"
 
-        kill "${SPINNER_PID}" 2>/dev/null || true
+    SPINNER_PID=""
 
-        wait "${SPINNER_PID}" 2>/dev/null || true
+    if [[ -n "$pid" ]]; then
 
-        SPINNER_PID=""
+        kill -TERM "$pid" >/dev/null 2>&1 || true
+
+        wait "$pid" >/dev/null 2>&1 || true
 
         printf '\r\033[K'
-
     fi
 }
+
+# ============================================================
+# LIMPIEZA
+# ============================================================
+
+cleanup() {
+
+    spinner_stop
+}
+
+trap cleanup EXIT INT TERM HUP
 
 # ============================================================
 # ERROR
@@ -253,19 +276,16 @@ fail() {
 require_command() {
 
     command -v "$1" >/dev/null 2>&1 ||
-        fail \
-            "No se encontró el comando requerido: $1"
+        fail "No se encontró el comando requerido: $1"
 }
 
 validate_environment() {
 
     [[ "${EUID}" -eq 0 ]] ||
-        fail \
-            "Este script debe ejecutarse como root."
+        fail "Este script debe ejecutarse como root."
 
     [[ "$(uname -s)" == "Linux" ]] ||
-        fail \
-            "Este script solo funciona en Linux."
+        fail "Este script solo funciona en Linux."
 
     require_command systemctl
     require_command sleep
@@ -273,8 +293,7 @@ validate_environment() {
     require_command sort
 
     [[ -d "${SYSTEMD_DIR}" ]] ||
-        fail \
-            "No existe el directorio de systemd."
+        fail "No existe el directorio de systemd."
 }
 
 # ============================================================
@@ -333,8 +352,7 @@ discover_services() {
     )
 
     [[ "${#SERVICES[@]}" -gt 0 ]] ||
-        fail \
-            "No se encontraron instancias HCR Server instaladas."
+        fail "No se encontraron instancias HCR Server instaladas."
 }
 
 # ============================================================
@@ -453,7 +471,6 @@ start_all() {
             "${failures} instancia(s) no pudieron iniciarse."
 
         return 1
-
     fi
 
     success \
@@ -527,7 +544,6 @@ stop_all() {
             "${failures} instancia(s) no pudieron detenerse."
 
         return 1
-
     fi
 
     success \
@@ -565,7 +581,7 @@ verify_final_state() {
                 error_message \
                     "Puerto ${port}: NO está activo."
 
-                failures=$((failures + 1))
+                failures=$((failures + 1)
 
             fi
 
@@ -741,7 +757,6 @@ main() {
                 "${RED}${FAIL}${RESET} Uso: $0 {start|stop}" >&2
 
             exit 1
-
             ;;
 
     esac
@@ -750,21 +765,9 @@ main() {
 
     validate_environment
 
-    # --------------------------------------------------------
-    # Descubrir automáticamente todas las instancias.
-    # --------------------------------------------------------
-
     discover_services
 
-    # --------------------------------------------------------
-    # Validar automáticamente todas las instancias.
-    # --------------------------------------------------------
-
     validate_services
-
-    # --------------------------------------------------------
-    # Ejecutar la acción sobre TODAS.
-    # --------------------------------------------------------
 
     if [[ "${ACTION}" == "start" ]]; then
 
@@ -790,10 +793,6 @@ main() {
 
     fi
 
-    # --------------------------------------------------------
-    # Verificación final automática.
-    # --------------------------------------------------------
-
     if ! verify_final_state; then
 
         show_failed_diagnostics
@@ -803,10 +802,6 @@ main() {
 
     fi
 
-    # --------------------------------------------------------
-    # Resumen final.
-    # --------------------------------------------------------
-
     show_summary
 }
 
@@ -815,15 +810,3 @@ main() {
 # ============================================================
 
 main "$@"
-
-La diferencia importante respecto al anterior es que no existe ninguna consulta interactiva. Desde el panel principal puedes hacer simplemente:
-
-bash start-stop-service.sh start
-
-para iniciar todos, o:
-
-bash start-stop-service.sh stop
-
-para detener todos.
-
-Y no toca "enable", "disable", archivos ".service", puertos, binario ni configuración. Solo ejecuta "systemctl start" o "systemctl stop" sobre cada instancia HCR encontrada.
