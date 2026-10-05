@@ -3,8 +3,9 @@ set -euo pipefail
 
 # ============================================================
 # HCR SERVER — SERVICE CONTROL ENGINE
-# Inicia o detiene TODAS las instancias HCR
-# creadas por el instalador.
+# ============================================================
+#
+# Control automático de TODAS las instancias HCR.
 #
 # USO:
 #
@@ -17,20 +18,31 @@ set -euo pipefail
 #   hcr-server-8880.service
 #   hcr-server-1443.service
 #
-# Todas las instancias serán controladas.
+# El script detecta automáticamente TODAS las instancias
+# instaladas y ejecuta la acción solicitada sobre todas.
 #
-# ESTE SCRIPT:
+# NO SOLICITA:
 #
-#   - NO tiene menú.
-#   - NO modifica unidades systemd.
-#   - NO habilita servicios.
-#   - NO deshabilita servicios.
-#   - NO modifica puertos.
-#   - NO modifica configuración.
-#   - NO modifica el binario.
-#   - NO desinstala HCR.
+#   - Servicio
+#   - Puerto
+#   - Selección
+#   - Confirmación
 #
-# Está diseñado para ser ejecutado por el panel principal.
+# ESTE SCRIPT NO:
+#
+#   - Modifica unidades systemd.
+#   - Habilita servicios.
+#   - Deshabilita servicios.
+#   - Modifica puertos.
+#   - Modifica configuración.
+#   - Modifica el binario.
+#   - Desinstala HCR.
+#
+# Solamente:
+#
+#   start -> inicia todas las instancias.
+#   stop  -> detiene todas las instancias.
+#
 # ============================================================
 
 PATH="/usr/sbin:/usr/bin:/sbin:/bin"
@@ -258,10 +270,9 @@ validate_environment() {
     require_command systemctl
     require_command sleep
     require_command find
-    require_command grep
     require_command sort
 
-    [ -d "${SYSTEMD_DIR}" ] ||
+    [[ -d "${SYSTEMD_DIR}" ]] ||
         fail \
             "No existe el directorio de systemd."
 }
@@ -281,18 +292,18 @@ discover_services() {
 
     while IFS= read -r file; do
 
-        [ -n "${file}" ] || continue
+        [[ -n "${file}" ]] || continue
 
         service="${file%.service}"
 
         # ----------------------------------------------------
-        # SOLAMENTE:
+        # ACEPTAR ÚNICAMENTE:
         #
         # hcr-server-8080.service
         # hcr-server-8880.service
         # hcr-server-1443.service
         #
-        # NO:
+        # NO ACEPTAR:
         #
         # hcr-server.service
         # hcr-server-test.service
@@ -321,7 +332,7 @@ discover_services() {
             sort -V
     )
 
-    [ "${#SERVICES[@]}" -gt 0 ] ||
+    [[ "${#SERVICES[@]}" -gt 0 ]] ||
         fail \
             "No se encontraron instancias HCR Server instaladas."
 }
@@ -378,49 +389,7 @@ validate_services() {
 }
 
 # ============================================================
-# ESTADO ACTUAL
-# ============================================================
-
-show_current_status() {
-
-    section "ESTADO ACTUAL"
-
-    local service
-    local port
-    local enabled
-
-    for i in "${!SERVICES[@]}"; do
-
-        service="${SERVICES[$i]}"
-        port="${PORTS[$i]}"
-
-        if systemctl is-active --quiet "${service}"; then
-
-            success \
-                "Puerto ${port}: servicio activo."
-
-        else
-
-            warning \
-                "Puerto ${port}: servicio detenido o inactivo."
-
-        fi
-
-        enabled="$(
-            systemctl is-enabled \
-                "${service}" \
-                2>/dev/null ||
-                true
-        )"
-
-        detail \
-            "Arranque automático: ${enabled:-desconocido}"
-
-    done
-}
-
-# ============================================================
-# INICIAR TODAS LAS INSTANCIAS
+# INICIAR TODAS
 # ============================================================
 
 start_all() {
@@ -431,7 +400,7 @@ start_all() {
 
     FAILED_SERVICES=()
 
-    section "INICIANDO INSTANCIAS"
+    section "INICIANDO TODAS LAS INSTANCIAS"
 
     for i in "${!SERVICES[@]}"; do
 
@@ -448,7 +417,7 @@ start_all() {
             if systemctl is-active --quiet "${service}"; then
 
                 success \
-                    "Puerto ${port}: servicio iniciado correctamente."
+                    "Puerto ${port}: ACTIVO."
 
             else
 
@@ -478,7 +447,7 @@ start_all() {
 
     printf '\n'
 
-    if [ "${failures}" -gt 0 ]; then
+    if (( failures > 0 )); then
 
         error_message \
             "${failures} instancia(s) no pudieron iniciarse."
@@ -494,7 +463,7 @@ start_all() {
 }
 
 # ============================================================
-# DETENER TODAS LAS INSTANCIAS
+# DETENER TODAS
 # ============================================================
 
 stop_all() {
@@ -505,7 +474,7 @@ stop_all() {
 
     FAILED_SERVICES=()
 
-    section "DETENIENDO INSTANCIAS"
+    section "DETENIENDO TODAS LAS INSTANCIAS"
 
     for i in "${!SERVICES[@]}"; do
 
@@ -522,7 +491,7 @@ stop_all() {
             if ! systemctl is-active --quiet "${service}"; then
 
                 success \
-                    "Puerto ${port}: servicio detenido correctamente."
+                    "Puerto ${port}: DETENIDO."
 
             else
 
@@ -552,7 +521,7 @@ stop_all() {
 
     printf '\n'
 
-    if [ "${failures}" -gt 0 ]; then
+    if (( failures > 0 )); then
 
         error_message \
             "${failures} instancia(s) no pudieron detenerse."
@@ -584,7 +553,7 @@ verify_final_state() {
         service="${SERVICES[$i]}"
         port="${PORTS[$i]}"
 
-        if [ "${ACTION}" = "start" ]; then
+        if [[ "${ACTION}" == "start" ]]; then
 
             if systemctl is-active --quiet "${service}"; then
 
@@ -641,7 +610,7 @@ show_failed_diagnostics() {
         service="${SERVICES[$i]}"
         port="${PORTS[$i]}"
 
-        if [ "${ACTION}" = "start" ]; then
+        if [[ "${ACTION}" == "start" ]]; then
 
             if ! systemctl is-active --quiet "${service}"; then
 
@@ -691,7 +660,7 @@ show_summary() {
 
     line
 
-    if [ "${ACTION}" = "start" ]; then
+    if [[ "${ACTION}" == "start" ]]; then
 
         printf '%b\n' \
             "${BRIGHT_GREEN}${BOLD}✔ HCR SERVER INICIADO${RESET}"
@@ -750,6 +719,15 @@ main() {
 
     ACTION="${1:-}"
 
+    # --------------------------------------------------------
+    # ÚNICAMENTE acepta:
+    #
+    #   start
+    #   stop
+    #
+    # No existe selección interactiva.
+    # --------------------------------------------------------
+
     case "${ACTION}" in
 
         start)
@@ -772,13 +750,23 @@ main() {
 
     validate_environment
 
+    # --------------------------------------------------------
+    # Descubrir automáticamente todas las instancias.
+    # --------------------------------------------------------
+
     discover_services
+
+    # --------------------------------------------------------
+    # Validar automáticamente todas las instancias.
+    # --------------------------------------------------------
 
     validate_services
 
-    show_current_status
+    # --------------------------------------------------------
+    # Ejecutar la acción sobre TODAS.
+    # --------------------------------------------------------
 
-    if [ "${ACTION}" = "start" ]; then
+    if [[ "${ACTION}" == "start" ]]; then
 
         if ! start_all; then
 
@@ -802,6 +790,10 @@ main() {
 
     fi
 
+    # --------------------------------------------------------
+    # Verificación final automática.
+    # --------------------------------------------------------
+
     if ! verify_final_state; then
 
         show_failed_diagnostics
@@ -811,6 +803,10 @@ main() {
 
     fi
 
+    # --------------------------------------------------------
+    # Resumen final.
+    # --------------------------------------------------------
+
     show_summary
 }
 
@@ -819,3 +815,15 @@ main() {
 # ============================================================
 
 main "$@"
+
+La diferencia importante respecto al anterior es que no existe ninguna consulta interactiva. Desde el panel principal puedes hacer simplemente:
+
+bash start-stop-service.sh start
+
+para iniciar todos, o:
+
+bash start-stop-service.sh stop
+
+para detener todos.
+
+Y no toca "enable", "disable", archivos ".service", puertos, binario ni configuración. Solo ejecuta "systemctl start" o "systemctl stop" sobre cada instancia HCR encontrada.
