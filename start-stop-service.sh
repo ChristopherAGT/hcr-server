@@ -185,6 +185,15 @@ spinner_start() {
 
     local message="$1"
 
+    if [[ -n "${SPINNER_PID}" ]]; then
+
+        if kill -0 "${SPINNER_PID}" >/dev/null 2>&1; then
+            return 0
+        fi
+
+        SPINNER_PID=""
+    fi
+
     (
         local frames=(
             "⠋"
@@ -200,6 +209,8 @@ spinner_start() {
         )
 
         local i=0
+
+        trap 'exit 0' TERM INT HUP
 
         while true; do
 
@@ -219,16 +230,17 @@ spinner_start() {
 
 spinner_stop() {
 
-    if [[ -n "${SPINNER_PID}" ]]; then
+    local pid="${SPINNER_PID:-}"
 
-        kill "${SPINNER_PID}" 2>/dev/null || true
+    SPINNER_PID=""
 
-        wait "${SPINNER_PID}" 2>/dev/null || true
+    if [[ -n "${pid}" ]]; then
 
-        SPINNER_PID=""
+        kill -TERM "${pid}" 2>/dev/null || true
+
+        wait "${pid}" 2>/dev/null || true
 
         printf '\r\033[K'
-
     fi
 }
 
@@ -253,9 +265,13 @@ fail() {
 
 require_command() {
 
-    command -v "$1" >/dev/null 2>&1 ||
+    local command_name="$1"
+
+    if ! command -v "${command_name}" >/dev/null 2>&1; then
+
         fail \
-            "No se encontró el comando requerido: $1"
+            "No se encontró el comando requerido: ${command_name}."
+    fi
 }
 
 validate_environment() {
@@ -307,7 +323,6 @@ discover_services() {
                 PORTS+=("${port}")
 
             fi
-
         fi
 
     done < <(
@@ -344,7 +359,6 @@ validate_services() {
 
             fail \
                 "La unidad ${service} no puede ser cargada por systemd."
-
         fi
 
         fragment="$(
@@ -363,7 +377,6 @@ validate_services() {
 
             detail \
                 "Unidad: ${fragment}"
-
         fi
 
     done
@@ -396,7 +409,6 @@ all_services_active() {
         if ! systemctl is-active --quiet "${service}"; then
 
             return 1
-
         fi
 
     done
@@ -408,13 +420,17 @@ all_services_active() {
 # RESOLVER TOGGLE
 # ============================================================
 #
-# Si TODAS están activas:
+# IMPORTANTE:
 #
-#   toggle -> stop
+# ACTION deja de contener "toggle".
 #
-# Si UNA o MÁS están inactivas:
+# Después de esta función:
 #
-#   toggle -> start
+#   ACTION=start
+#
+# o:
+#
+#   ACTION=stop
 #
 # ============================================================
 
@@ -427,7 +443,6 @@ resolve_toggle() {
     else
 
         ACTION="start"
-
     fi
 }
 
@@ -454,7 +469,6 @@ show_toggle_decision() {
 
         info \
             "TOGGLE → se iniciarán todas las instancias."
-
     fi
 
     printf '\n'
@@ -499,7 +513,6 @@ start_all() {
                 FAILED_SERVICES+=("${service}")
 
                 failures=$((failures + 1))
-
             fi
 
         else
@@ -512,7 +525,6 @@ start_all() {
             FAILED_SERVICES+=("${service}")
 
             failures=$((failures + 1))
-
         fi
 
     done
@@ -525,7 +537,6 @@ start_all() {
             "${failures} instancia(s) no pudieron iniciarse."
 
         return 1
-
     fi
 
     success \
@@ -573,7 +584,6 @@ stop_all() {
                 FAILED_SERVICES+=("${service}")
 
                 failures=$((failures + 1))
-
             fi
 
         else
@@ -586,7 +596,6 @@ stop_all() {
             FAILED_SERVICES+=("${service}")
 
             failures=$((failures + 1))
-
         fi
 
     done
@@ -599,7 +608,6 @@ stop_all() {
             "${failures} instancia(s) no pudieron detenerse."
 
         return 1
-
     fi
 
     success \
@@ -637,8 +645,7 @@ verify_final_state() {
                 error_message \
                     "Puerto ${port}: NO está activo."
 
-                failures=$((failures + 1)
-
+                failures=$((failures + 1))
             fi
 
         else
@@ -654,9 +661,7 @@ verify_final_state() {
 
                 success \
                     "Puerto ${port}: DETENIDO."
-
             fi
-
         fi
 
     done
@@ -700,7 +705,6 @@ show_failed_diagnostics() {
                     true
 
                 printf '\n'
-
             fi
 
         else
@@ -714,11 +718,8 @@ show_failed_diagnostics() {
                     "Servicio: ${service}"
 
                 printf '\n'
-
             fi
-
         fi
-
     done
 }
 
@@ -746,7 +747,6 @@ show_summary() {
 
             detail \
                 "Puerto ${PORTS[$i]} → ${SERVICES[$i]} → ACTIVO"
-
         done
 
         printf '\n'
@@ -768,14 +768,12 @@ show_summary() {
 
             detail \
                 "Puerto ${PORTS[$i]} → ${SERVICES[$i]} → DETENIDO"
-
         done
 
         printf '\n'
 
         printf '%b\n' \
             "${DIM}Todas las instancias HCR Server están detenidas.${RESET}"
-
     fi
 
     line
@@ -789,37 +787,24 @@ show_summary() {
 
 main() {
 
-    ACTION="${1:-}"
+    local requested_action="${1:-}"
 
-    case "${ACTION}" in
+    # --------------------------------------------------------
+    # VALIDAR ARGUMENTO
+    # --------------------------------------------------------
+
+    case "${requested_action}" in
 
         start)
+            ACTION="start"
             ;;
 
         stop)
+            ACTION="stop"
             ;;
 
         toggle)
-
-            # ------------------------------------------------
-            # TOGGLE:
-            #
-            # Todas activas -> STOP
-            # Alguna inactiva -> START
-            # ------------------------------------------------
-
-            header
-
-            validate_environment
-
-            discover_services
-
-            validate_services
-
-            resolve_toggle
-
-            show_toggle_decision
-
+            ACTION="toggle"
             ;;
 
         *)
@@ -828,65 +813,40 @@ main() {
                 "${RED}${FAIL}${RESET} Uso: $0 {start|stop|toggle}" >&2
 
             exit 1
-
             ;;
 
     esac
 
     # --------------------------------------------------------
-    # Para start / stop se mantiene el flujo normal.
-    #
-    # Para toggle ya se hizo:
-    #
-    #   header
-    #   validate_environment
-    #   discover_services
-    #   validate_services
-    #   resolve_toggle
-    #
+    # PREPARAR ENTORNO
     # --------------------------------------------------------
 
-    if [[ "${ACTION}" != "toggle" ]]; then
+    header
 
-        header
+    validate_environment
 
-        validate_environment
+    discover_services
 
-        discover_services
+    validate_services
 
-        validate_services
+    # --------------------------------------------------------
+    # RESOLVER TOGGLE
+    # --------------------------------------------------------
 
+    if [[ "${ACTION}" == "toggle" ]]; then
+
+        resolve_toggle
+
+        show_toggle_decision
     fi
 
     # --------------------------------------------------------
-    # Ejecutar acción global.
+    # EJECUTAR ACCIÓN
     # --------------------------------------------------------
 
-    if [[ "${ACTION}" == "start" ]]; then
+    case "${ACTION}" in
 
-        if ! start_all; then
-
-            show_failed_diagnostics
-
-            fail \
-                "No todas las instancias HCR pudieron iniciarse."
-
-        fi
-
-    elif [[ "${ACTION}" == "stop" ]]; then
-
-        if ! stop_all; then
-
-            show_failed_diagnostics
-
-            fail \
-                "No todas las instancias HCR pudieron detenerse."
-
-        fi
-
-    elif [[ "${ACTION}" == "toggle" ]]; then
-
-        if [[ "${ACTION}" == "start" ]]; then
+        start)
 
             if ! start_all; then
 
@@ -894,10 +854,11 @@ main() {
 
                 fail \
                     "No todas las instancias HCR pudieron iniciarse."
-
             fi
 
-        else
+            ;;
+
+        stop)
 
             if ! stop_all; then
 
@@ -905,15 +866,20 @@ main() {
 
                 fail \
                     "No todas las instancias HCR pudieron detenerse."
-
             fi
 
-        fi
+            ;;
 
-    fi
+        *)
+
+            fail \
+                "Acción interna no válida: ${ACTION}."
+            ;;
+
+    esac
 
     # --------------------------------------------------------
-    # Verificación final.
+    # VERIFICACIÓN FINAL
     # --------------------------------------------------------
 
     if ! verify_final_state; then
@@ -922,11 +888,10 @@ main() {
 
         fail \
             "La verificación final detectó instancias en un estado incorrecto."
-
     fi
 
     # --------------------------------------------------------
-    # Resumen.
+    # RESUMEN
     # --------------------------------------------------------
 
     show_summary
