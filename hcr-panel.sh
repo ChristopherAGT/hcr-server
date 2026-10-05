@@ -251,79 +251,6 @@ hcr_is_installed() {
 }
 
 # ============================================================
-# LISTAR PUERTOS
-# ============================================================
-
-get_hcr_ports() {
-
-    local units
-    local unit
-    local path
-    local port
-
-    units="$(get_hcr_units)"
-
-    [[ -n "$units" ]] || return 0
-
-    while IFS= read -r unit; do
-
-        [[ -n "$unit" ]] || continue
-
-        path="$(get_unit_path "$unit")"
-        port="$(get_unit_listen_port "$unit" "$path")"
-
-        if [[ -n "$port" ]]; then
-            echo "$port"
-        fi
-
-    done <<< "$units" |
-    sort -n -u
-}
-
-# ============================================================
-# HEADER
-# ============================================================
-
-header() {
-
-    clear_screen
-
-    local count
-    local installed
-    local ports
-    local port_line
-
-    count="$(count_hcr_instances)"
-
-    if hcr_is_installed; then
-        installed="${GREEN}Instalado${RESET} 🟢"
-    else
-        installed="${RED}No Instalado${RESET} 🔴"
-    fi
-
-    ports="$(get_hcr_ports | paste -sd ', ' -)"
-
-    if [[ -z "$ports" ]]; then
-        port_line="${GRAY}---${RESET}"
-    else
-        port_line="${WHITE}${ports}${RESET}"
-    fi
-
-    echo
-    echo -e "${CYAN}    ╭────────────────────────────────────────────────────────╮${RESET}"
-    echo -e "${CYAN}    │                                                        │${RESET}"
-    echo -e "${CYAN}    │${BOLD}${WHITE}       H C R   S E R V E R${RESET}                              ${CYAN}│${RESET}"
-    echo -e "${CYAN}    │${GRAY}       Premium Control Panel${RESET}                            ${CYAN}│${RESET}"
-    echo -e "${CYAN}    │                                                        │${RESET}"
-    echo -e "${CYAN}    ├────────────────────────────────────────────────────────┤${RESET}"
-    echo -e "${CYAN}    │${RESET}  ${WHITE}HCR:${RESET} ${installed}                                      ${CYAN}│${RESET}"
-    echo -e "${CYAN}    │${RESET}  ${WHITE}Instancias HCR:${RESET} ${GREEN}${count}${RESET}                                ${CYAN}│${RESET}"
-    echo -e "${CYAN}    │${RESET}  ${WHITE}Puertos:${RESET} ${port_line}                              ${CYAN}│${RESET}"
-    echo -e "${CYAN}    ╰────────────────────────────────────────────────────────╯${RESET}"
-    echo
-}
-
-# ============================================================
 # RUTA DE UNIDAD
 # ============================================================
 
@@ -482,7 +409,12 @@ is_port_listening() {
     ss -H -lnt 2>/dev/null |
         awk -v port="$port" '
             {
-                if ($4 ~ (":" port "$")) {
+                address = $4
+
+                if (
+                    address ~ (":" port "$") ||
+                    address ~ ("\\[" port "\\]:" port "$")
+                ) {
                     found=1
                     exit
                 }
@@ -495,6 +427,101 @@ is_port_listening() {
                 exit 1
             }
         '
+}
+
+# ============================================================
+# LISTAR PUERTOS ACTIVOS
+# ============================================================
+#
+# IMPORTANTE:
+#
+# Esta función NO muestra simplemente los puertos definidos
+# en las unidades systemd.
+#
+# Solo muestra aquellos puertos que realmente están escuchando
+# en este momento mediante ss.
+#
+# Ejemplo:
+#
+#   hcr-server-80.service  -> activo + escucha -> 80
+#   hcr-server-443.service -> detenido            -> NO aparece
+#
+# ============================================================
+
+get_hcr_ports() {
+
+    local units
+    local unit
+    local path
+    local port
+
+    units="$(get_hcr_units)"
+
+    [[ -n "$units" ]] || return 0
+
+    while IFS= read -r unit; do
+
+        [[ -n "$unit" ]] || continue
+
+        path="$(get_unit_path "$unit")"
+
+        port="$(get_unit_listen_port "$unit" "$path")"
+
+        [[ -n "$port" ]] || continue
+
+        if is_port_listening "$port"; then
+            echo "$port"
+        fi
+
+    done <<< "$units" |
+    sort -n -u
+}
+
+# ============================================================
+# HEADER
+# ============================================================
+
+header() {
+
+    clear_screen
+
+    local count
+    local installed
+    local ports
+    local port_line
+
+    count="$(count_hcr_instances)"
+
+    if hcr_is_installed; then
+        installed="${GREEN}Instalado${RESET} 🟢"
+    else
+        installed="${RED}No Instalado${RESET} 🔴"
+    fi
+
+    # --------------------------------------------------------
+    # SOLO PUERTOS REALMENTE ACTIVOS
+    # --------------------------------------------------------
+
+    ports="$(get_hcr_ports | paste -sd ', ' -)"
+
+    if [[ -z "$ports" ]]; then
+        port_line="${GRAY}---${RESET}"
+    else
+        port_line="${WHITE}${ports}${RESET}"
+    fi
+
+    echo
+    echo -e "${CYAN}    ╭────────────────────────────────────────────────────────╮${RESET}"
+    echo -e "${CYAN}    │                                                        │${RESET}"
+    echo -e "${CYAN}    │${BOLD}${WHITE}       H C R   S E R V E R${RESET}                              ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │${GRAY}       Premium Control Panel${RESET}                            ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │                                                        │${RESET}"
+    echo -e "${CYAN}    ├────────────────────────────────────────────────────────┤${RESET}"
+    echo -e "${CYAN}    │${RESET}  ${WHITE}HCR:${RESET} ${installed}                                      ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │${RESET}  ${WHITE}Instancias HCR:${RESET} ${GREEN}${count}${RESET}                                ${CYAN}│${RESET}"
+    echo -e "${CYAN}    │${RESET}  ${WHITE}Puertos:${RESET} ${port_line}                              ${CYAN}│${RESET}"
+    echo -e "${CYAN}    ╰────────────────────────────────────────────────────────╯${RESET}"
+    echo
 }
 
 # ============================================================
@@ -1410,37 +1437,30 @@ main() {
         case "$option" in
 
             1|01)
-
                 install_service
                 ;;
 
             2|02)
-
                 uninstall_service
                 ;;
 
             3|03)
-
                 port_management_menu
                 ;;
 
             4|04)
-
                 show_general_status
                 ;;
 
             5|05)
-
                 start_stop_service
                 ;;
 
             6|06)
-
                 restart_service
                 ;;
 
             7|07)
-
                 optimize_service
                 ;;
 
