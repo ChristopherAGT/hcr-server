@@ -12,7 +12,8 @@ set -euo pipefail
 #   hcr-server-8880.service
 #   hcr-server-1443.service
 #
-# Todas serán reiniciadas y verificadas.
+# Todas serán reiniciadas automáticamente.
+# NO solicita seleccionar ninguna instancia.
 # ============================================================
 
 PATH="/usr/sbin:/usr/bin:/sbin:/bin"
@@ -254,12 +255,12 @@ discover_services() {
 
     while IFS= read -r file; do
 
-        [ -n "${file}" ] || continue
+        [[ -n "${file}" ]] || continue
 
         service="${file%.service}"
 
         # ----------------------------------------------------
-        # Solamente aceptar:
+        # Aceptar únicamente:
         #
         # hcr-server-8080.service
         # hcr-server-8880.service
@@ -275,7 +276,6 @@ discover_services() {
 
             port="${BASH_REMATCH[1]}"
 
-            # Validar rango TCP/UDP válido.
             if (( port >= 1 && port <= 65535 )); then
 
                 SERVICES+=("${file}")
@@ -296,10 +296,10 @@ discover_services() {
     )
 
     # --------------------------------------------------------
-    # Validar que exista al menos una instancia.
+    # Debe existir al menos una instancia.
     # --------------------------------------------------------
 
-    if [ "${#SERVICES[@]}" -eq 0 ]; then
+    if [[ "${#SERVICES[@]}" -eq 0 ]]; then
 
         fail \
             "No se encontraron instancias HCR Server instaladas."
@@ -315,15 +315,12 @@ validate_services() {
 
     local service
     local fragment
-    local expected
 
     section "VALIDANDO INSTANCIAS"
 
     for i in "${!SERVICES[@]}"; do
 
         service="${SERVICES[$i]}"
-
-        expected="${SYSTEMD_DIR}/${service}"
 
         if ! systemctl cat "${service}" >/dev/null 2>&1; then
 
@@ -343,11 +340,8 @@ validate_services() {
 
         if [[ -n "${fragment}" ]]; then
 
-            detail \
-                "${service}"
-
-            detail \
-                "Unidad: ${fragment}"
+            detail "${service}"
+            detail "Unidad: ${fragment}"
 
         else
 
@@ -414,10 +408,18 @@ show_current_status() {
 
 restart_services() {
 
-    section "REINICIANDO INSTANCIAS"
+    section "REINICIANDO TODAS LAS INSTANCIAS"
 
     local service
     local port
+    local failed=0
+
+    # --------------------------------------------------------
+    # IMPORTANTE:
+    #
+    # No se solicita selección.
+    # Todas las instancias descubiertas serán reiniciadas.
+    # --------------------------------------------------------
 
     for i in "${!SERVICES[@]}"; do
 
@@ -432,18 +434,45 @@ restart_services() {
             spinner_stop
 
             success \
-                "Puerto ${port}: comando de reinicio ejecutado."
+                "Puerto ${port}: reinicio ejecutado."
 
         else
 
             spinner_stop
 
-            fail \
-                "systemd no pudo reiniciar ${service}."
+            error_message \
+                "Puerto ${port}: falló el reinicio."
+
+            detail \
+                "Servicio: ${service}"
+
+            failed=$((failed + 1))
 
         fi
 
     done
+
+    printf '\n'
+
+    # --------------------------------------------------------
+    # Si algún restart individual falló, no se cancela
+    # inmediatamente. Se continúa con las demás instancias
+    # para que TODAS tengan oportunidad de reiniciarse.
+    # --------------------------------------------------------
+
+    if (( failed > 0 )); then
+
+        warning \
+            "${failed} instancia(s) presentaron errores durante el reinicio."
+
+        return 1
+
+    fi
+
+    success \
+        "El comando de reinicio fue ejecutado para todas las instancias."
+
+    return 0
 }
 
 # ============================================================
@@ -454,14 +483,11 @@ wait_for_services() {
 
     section "VERIFICANDO ARRANQUE"
 
-    local attempts
+    local attempts=0
     local max_attempts=50
 
     local all_active
     local service
-    local port
-
-    attempts=0
 
     spinner_start \
         "Esperando a que todas las instancias queden activas..."
@@ -482,7 +508,7 @@ wait_for_services() {
 
         done
 
-        if [ "${all_active}" = true ]; then
+        if [[ "${all_active}" == true ]]; then
 
             spinner_stop
 
@@ -533,7 +559,7 @@ verify_services() {
                 true
         )"
 
-        if [ "${state}" = "active" ]; then
+        if [[ "${state}" == "active" ]]; then
 
             pid="$(
                 systemctl show \
@@ -569,7 +595,7 @@ verify_services() {
 
     printf '\n'
 
-    if [ "${failures}" -gt 0 ]; then
+    if (( failures > 0 )); then
 
         error_message \
             "${failures} instancia(s) no quedaron activas."
@@ -637,7 +663,7 @@ show_summary() {
     printf '\n'
 
     detail \
-        "Instancias reiniciadas: ${#SERVICES[@]}"
+        "Instancias procesadas: ${#SERVICES[@]}"
 
     for i in "${!SERVICES[@]}"; do
 
@@ -666,13 +692,33 @@ main() {
 
     validate_environment
 
+    # --------------------------------------------------------
+    # Descubre automáticamente TODAS las instancias.
+    # --------------------------------------------------------
+
     discover_services
+
+    # --------------------------------------------------------
+    # Valida automáticamente TODAS.
+    # --------------------------------------------------------
 
     validate_services
 
+    # --------------------------------------------------------
+    # Muestra el estado actual de TODAS.
+    # --------------------------------------------------------
+
     show_current_status
 
-    restart_services
+    # --------------------------------------------------------
+    # Reinicia TODAS sin preguntar.
+    # --------------------------------------------------------
+
+    restart_services || true
+
+    # --------------------------------------------------------
+    # Espera a que TODAS estén activas.
+    # --------------------------------------------------------
 
     if ! wait_for_services; then
 
@@ -683,6 +729,10 @@ main() {
 
     fi
 
+    # --------------------------------------------------------
+    # Verificación final de TODAS.
+    # --------------------------------------------------------
+
     if ! verify_services; then
 
         show_failed_diagnostics
@@ -692,6 +742,10 @@ main() {
 
     fi
 
+    # --------------------------------------------------------
+    # Resumen.
+    # --------------------------------------------------------
+
     show_summary
 }
 
@@ -700,3 +754,9 @@ main() {
 # ============================================================
 
 main "$@"
+
+Cambio clave: ya no existe ninguna selección de servicio. El flujo es:
+
+"descubrir → validar todas → mostrar estado → reiniciar todas → esperar → verificar todas → diagnóstico si alguna falla".
+
+Además, si tienes "8080", "8880", "1443" y "2200", los cuatro se procesan automáticamente en la misma ejecución.
