@@ -8,7 +8,7 @@ set -euo pipefail
 # Modifica parámetros de rendimiento de TODAS las instancias
 # HCR Server detectadas.
 #
-# Instancias compatibles:
+# Detecta:
 #
 #   hcr-server.service
 #   hcr-server-80.service
@@ -17,10 +17,9 @@ set -euo pipefail
 #   hcr-server-1443.service
 #   etc.
 #
-# IMPORTANTE:
+# ESTE SCRIPT SOLO MODIFICA PARÁMETROS DE RENDIMIENTO.
 #
-# Este script NO:
-#
+# NO:
 #   - crea servicios
 #   - elimina servicios
 #   - modifica puertos
@@ -28,9 +27,7 @@ set -euo pipefail
 #   - habilita servicios
 #   - deshabilita servicios
 #
-# Este script SOLO modifica parámetros de rendimiento.
-#
-# TODOS los cambios se aplican GLOBALMENTE a TODAS las
+# TODOS los cambios se aplican GLOBALMENTE a todas las
 # instancias HCR detectadas.
 #
 # ============================================================
@@ -120,6 +117,47 @@ line() {
 
     printf '%b\n' \
         "${DIM}────────────────────────────────────────────────────────────${RESET}"
+
+}
+
+header() {
+
+    clear_screen
+
+    printf '\n'
+
+    printf '%b\n' \
+        "${BRIGHT_CYAN}${BOLD}╭────────────────────────────────────────────────────────────╮${RESET}"
+
+    printf '%b\n' \
+        "${BRIGHT_CYAN}${BOLD}│${RESET}                                                            ${BRIGHT_CYAN}${BOLD}│${RESET}"
+
+    printf '%b\n' \
+        "${BRIGHT_CYAN}${BOLD}│${RESET}              ${BRIGHT_WHITE}${BOLD}H C R   S E R V E R${RESET}                 ${BRIGHT_CYAN}${BOLD}│${RESET}"
+
+    printf '%b\n' \
+        "${BRIGHT_CYAN}${BOLD}│${RESET}              ${CYAN}Global Performance Optimizer${RESET}          ${BRIGHT_CYAN}${BOLD}│${RESET}"
+
+    printf '%b\n' \
+        "${BRIGHT_CYAN}${BOLD}│${RESET}                                                            ${BRIGHT_CYAN}${BOLD}│${RESET}"
+
+    printf '%b\n' \
+        "${BRIGHT_CYAN}${BOLD}╰────────────────────────────────────────────────────────────╯${RESET}"
+
+    printf '\n'
+
+}
+
+section() {
+
+    local title="$1"
+
+    printf '\n'
+
+    printf '%b\n' \
+        "${BRIGHT_BLUE}${BOLD}◆ ${title}${RESET}"
+
+    line
 
 }
 
@@ -217,11 +255,11 @@ spinner_stop() {
 
     SPINNER_PID=""
 
-    if [[ -n "$pid" ]]; then
+    if [[ -n "${pid}" ]]; then
 
-        kill -TERM "$pid" 2>/dev/null || true
+        kill -TERM "${pid}" 2>/dev/null || true
 
-        wait "$pid" 2>/dev/null || true
+        wait "${pid}" 2>/dev/null || true
 
     fi
 
@@ -269,6 +307,7 @@ validate_environment() {
         fail "Este script solo funciona en Linux."
 
     require_command systemctl
+    require_command systemd-analyze
     require_command sed
     require_command grep
     require_command cp
@@ -288,62 +327,30 @@ validate_environment() {
 # ============================================================
 # DESCUBRIR SERVICIOS HCR
 # ============================================================
-#
-# Detecta:
-#
-#   hcr-server.service
-#   hcr-server-XXXX.service
-#
-# ============================================================
 
 discover_services() {
 
     SERVICES=()
 
-    {
-        if [[ -f "${SYSTEMD_DIR}/${SERVICE_BASE}" ]]; then
-            printf '%s\n' "${SERVICE_BASE}"
-        fi
-
-        find "${SYSTEMD_DIR}" \
-            -maxdepth 1 \
-            -type f \
-            -name "${SERVICE_PREFIX}*.service" \
-            -printf '%f\n' \
-            2>/dev/null |
-            grep -E '^hcr-server-[0-9]+\.service$' ||
-            true
-
-    } |
-    sort -V |
-    while IFS= read -r service; do
-
-        [[ -n "${service}" ]] || continue
-
-        printf '%s\n' "${service}"
-
-    done |
-    while IFS= read -r service; do
-
-        [[ -n "${service}" ]] || continue
-
-        SERVICES+=("${service}")
-
-    done
-
     # --------------------------------------------------------
-    # IMPORTANTE:
+    # Servicio principal:
     #
-    # Los while anteriores pueden ejecutarse en subshell según
-    # el shell utilizado. Para evitarlo, hacemos la detección
-    # directamente en un array mediante mapfile.
+    # hcr-server.service
     # --------------------------------------------------------
-
-    SERVICES=()
 
     if [[ -f "${SYSTEMD_DIR}/${SERVICE_BASE}" ]]; then
+
         SERVICES+=("${SERVICE_BASE}")
+
     fi
+
+    # --------------------------------------------------------
+    # Instancias por puerto:
+    #
+    # hcr-server-8008.service
+    # hcr-server-8880.service
+    # etc.
+    # --------------------------------------------------------
 
     while IFS= read -r service; do
 
@@ -352,6 +359,7 @@ discover_services() {
         SERVICES+=("${service}")
 
     done < <(
+
         find "${SYSTEMD_DIR}" \
             -maxdepth 1 \
             -type f \
@@ -360,11 +368,11 @@ discover_services() {
             2>/dev/null |
             grep -E '^hcr-server-[0-9]+\.service$' |
             sort -V
+
     )
 
     ((${#SERVICES[@]} > 0)) ||
-        fail \
-            "No se encontraron instancias HCR Server."
+        fail "No se encontraron instancias HCR Server."
 
 }
 
@@ -486,7 +494,7 @@ get_value_from_unit() {
 }
 
 # ============================================================
-# VALOR GLOBAL
+# OBTENER VALOR GLOBAL
 # ============================================================
 
 get_global_value() {
@@ -684,12 +692,8 @@ create_backups() {
         unit="${SYSTEMD_DIR}/${service}"
         backup="${unit}.optimization-backup"
 
-        if [[ ! -f "${unit}" ]]; then
-
-            fail \
-                "No existe la unidad ${unit}."
-
-        fi
+        [[ -f "${unit}" ]] ||
+            fail "No existe la unidad ${unit}."
 
         spinner_start \
             "Respaldando ${service}..."
@@ -719,7 +723,7 @@ create_backups() {
 }
 
 # ============================================================
-# COMPROBAR SI EXECSTART TIENE PARÁMETRO
+# COMPROBAR PARÁMETRO EXECSTART
 # ============================================================
 
 exec_parameter_exists() {
@@ -736,18 +740,6 @@ exec_parameter_exists() {
 # ============================================================
 # MODIFICAR PARÁMETRO EXECSTART
 # ============================================================
-#
-# Si existe:
-#
-#   --max-download-frame 6144
-#
-# pasa a:
-#
-#   --max-download-frame 1500
-#
-# Si NO existe, lo añade al ExecStart.
-#
-# ============================================================
 
 replace_exec_parameter_in_unit() {
 
@@ -755,26 +747,46 @@ replace_exec_parameter_in_unit() {
     local parameter="$2"
     local value="$3"
 
+    local tmp
+
+    tmp="$(
+        mktemp \
+            "${unit}.tmp.XXXXXX"
+    )"
+
+    # --------------------------------------------------------
+    # Si el parámetro ya existe, reemplazarlo.
+    # --------------------------------------------------------
+
     if exec_parameter_exists \
         "${unit}" \
         "${parameter}"; then
 
-        sed -E -i \
+        if sed -E \
             "s#(${parameter}[[:space:]]+)[^[:space:]]+#\1${value}#g" \
-            "${unit}"
+            "${unit}" > "${tmp}"; then
 
-        return 0
+            mv -f \
+                "${tmp}" \
+                "${unit}"
+
+            return 0
+
+        fi
+
+        rm -f "${tmp}"
+
+        return 1
+
     fi
 
     # --------------------------------------------------------
-    # Parámetro inexistente.
+    # El parámetro no existe.
     #
-    # Se añade al ExecStart.
-    # Se contempla ExecStart en una sola línea o terminado
-    # con "\" para continuación.
+    # Se añade al primer ExecStart.
     # --------------------------------------------------------
 
-    awk \
+    if awk \
         -v parameter="${parameter}" \
         -v value="${value}" '
 
@@ -805,16 +817,28 @@ replace_exec_parameter_in_unit() {
             print
         }
 
-        ' \
-        "${unit}" > "${unit}.tmp"
+        END {
 
-    if [[ "${inserted:-0}" == "1" ]]; then
-        :
+            if (!inserted) {
+                exit 10
+            }
+
+        }
+
+        ' \
+        "${unit}" > "${tmp}"; then
+
+        mv -f \
+            "${tmp}" \
+            "${unit}"
+
+        return 0
+
     fi
 
-    mv -f \
-        "${unit}.tmp" \
-        "${unit}"
+    rm -f "${tmp}"
+
+    return 1
 
 }
 
@@ -836,9 +860,20 @@ replace_systemd_parameter_in_unit() {
 
     else
 
-        sed -i \
-            "/^\[Service\]/a ${parameter}=${value}" \
-            "${unit}"
+        if grep -qE '^\[Service\][[:space:]]*$' "${unit}"; then
+
+            sed -i \
+                "/^\[Service\][[:space:]]*$/a ${parameter}=${value}" \
+                "${unit}"
+
+        else
+
+            printf '\n[Service]\n%s=%s\n' \
+                "${parameter}" \
+                "${value}" \
+                >> "${unit}"
+
+        fi
 
     fi
 
@@ -885,6 +920,8 @@ apply_exec_parameter_global() {
 
     done
 
+    return 0
+
 }
 
 # ============================================================
@@ -927,6 +964,8 @@ apply_systemd_parameter_global() {
         MODIFIED_FILES+=("${unit}")
 
     done
+
+    return 0
 
 }
 
@@ -972,7 +1011,8 @@ change_max_frame() {
 
     apply_exec_parameter_global \
         "--max-download-frame" \
-        "${value}"
+        "${value}" ||
+        return 1
 
     success \
         "Max Download Frame actualizado globalmente a ${value}."
@@ -1021,7 +1061,8 @@ change_poll_timeout() {
 
     apply_exec_parameter_global \
         "--download-poll-timeout" \
-        "${value}"
+        "${value}" ||
+        return 1
 
     success \
         "Download Poll Timeout actualizado globalmente a ${value}."
@@ -1070,7 +1111,8 @@ change_nofile() {
 
     apply_systemd_parameter_global \
         "LimitNOFILE" \
-        "${value}"
+        "${value}" ||
+        return 1
 
     success \
         "LimitNOFILE actualizado globalmente a ${value}."
@@ -1119,7 +1161,8 @@ change_tasks() {
 
     apply_systemd_parameter_global \
         "TasksMax" \
-        "${value}"
+        "${value}" ||
+        return 1
 
     success \
         "TasksMax actualizado globalmente a ${value}."
@@ -1168,7 +1211,8 @@ change_memory() {
 
     apply_systemd_parameter_global \
         "MemoryMax" \
-        "${value}"
+        "${value}" ||
+        return 1
 
     success \
         "MemoryMax actualizado globalmente a ${value}."
@@ -1218,7 +1262,8 @@ change_swap() {
 
     apply_systemd_parameter_global \
         "MemorySwapMax" \
-        "${value}"
+        "${value}" ||
+        return 1
 
     success \
         "MemorySwapMax actualizado globalmente a ${value}."
@@ -1270,7 +1315,8 @@ change_nice() {
 
     apply_systemd_parameter_global \
         "Nice" \
-        "${value}"
+        "${value}" ||
+        return 1
 
     success \
         "Nice actualizado globalmente a ${value}."
@@ -1288,34 +1334,43 @@ restore_recommended() {
 
     apply_exec_parameter_global \
         "--max-download-frame" \
-        "${RECOMMENDED_MAX_DOWNLOAD_FRAME}"
+        "${RECOMMENDED_MAX_DOWNLOAD_FRAME}" ||
+        return 1
 
     apply_exec_parameter_global \
         "--download-poll-timeout" \
-        "${RECOMMENDED_DOWNLOAD_POLL_TIMEOUT}"
+        "${RECOMMENDED_DOWNLOAD_POLL_TIMEOUT}" ||
+        return 1
 
     apply_systemd_parameter_global \
         "LimitNOFILE" \
-        "${RECOMMENDED_LIMIT_NOFILE}"
+        "${RECOMMENDED_LIMIT_NOFILE}" ||
+        return 1
 
     apply_systemd_parameter_global \
         "TasksMax" \
-        "${RECOMMENDED_TASKS_MAX}"
+        "${RECOMMENDED_TASKS_MAX}" ||
+        return 1
 
     apply_systemd_parameter_global \
         "MemoryMax" \
-        "${RECOMMENDED_MEMORY_MAX}"
+        "${RECOMMENDED_MEMORY_MAX}" ||
+        return 1
 
     apply_systemd_parameter_global \
         "MemorySwapMax" \
-        "${RECOMMENDED_MEMORY_SWAP_MAX}"
+        "${RECOMMENDED_MEMORY_SWAP_MAX}" ||
+        return 1
 
     apply_systemd_parameter_global \
         "Nice" \
-        "${RECOMMENDED_NICE}"
+        "${RECOMMENDED_NICE}" ||
+        return 1
 
     success \
         "Valores recomendados aplicados a TODAS las instancias."
+
+    return 0
 
 }
 
@@ -1351,6 +1406,8 @@ validate_units() {
         fi
 
     done
+
+    return 0
 
 }
 
@@ -1404,8 +1461,10 @@ apply_changes() {
 
         restore_backups
 
-        fail \
+        error_message \
             "Se restauró automáticamente la configuración anterior."
+
+        return 1
 
     fi
 
@@ -1427,8 +1486,10 @@ apply_changes() {
 
         restore_backups
 
-        fail \
+        error_message \
             "No se pudo recargar systemd. Configuración restaurada."
+
+        return 1
 
     fi
 
@@ -1504,8 +1565,10 @@ apply_changes() {
 
         done
 
-        fail \
+        error_message \
             "La operación global falló. Se restauró la configuración anterior."
+
+        return 1
 
     fi
 
@@ -1813,6 +1876,13 @@ menu() {
                     apply_changes ||
                         true
 
+                else
+
+                    warning \
+                        "No se pudieron aplicar todos los valores recomendados."
+
+                    restore_backups
+
                 fi
 
                 printf '\n'
@@ -1855,8 +1925,6 @@ menu() {
 # ============================================================
 
 main() {
-
-    header
 
     validate_environment
 
